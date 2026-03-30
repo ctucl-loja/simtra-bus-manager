@@ -1,0 +1,9 @@
+uvicorn main:app --reload
+
+python ./services/bus_monitor.py
+
+python ./services/data_loader.py
+
+python ./scripts/navigation_simulation.py
+
+cd C:\Users\ctucl\Documents\Python\simtra-bus-manager
