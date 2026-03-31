@@ -23,7 +23,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-logger = logging.getLogger("sync-service")
+logger = logging.getLogger("data_loader")
 
 # ─────────────────────────────────────────────
 # API - CLIENT

@@ -35,7 +35,7 @@ def setup_logger() -> logging.Logger:
     console_handler.setFormatter(formatter)
 
     # ── Handler archivo (un .log por día) ────────────────────────────────────
-    log_filename = f"simtra_{datetime.now().strftime('%Y-%m-%d')}.log"
+    log_filename = f"bus_monitor.log"
     file_handler = logging.FileHandler(log_filename, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
