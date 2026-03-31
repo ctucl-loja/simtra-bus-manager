@@ -20,7 +20,8 @@ BUS_REGISTER = int(os.getenv("BUS_REGISTER", 0))
 # ─────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    filename=f"data_loader.log"
 )
 
 logger = logging.getLogger("data_loader")
