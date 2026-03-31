@@ -225,6 +225,12 @@ def schedule_watcher(monitor_ref: list, stop_event: threading.Event):
 
         # ── Bus sin trabajo hoy: nada que evaluar ───────────────────────────
         if not ALL_DISPATCHES:
+            time.sleep(60)
+            log.debug("[WATCHER] Sin despachos — reintentando consulta a la API")
+            has_dispatches = load_all_dispatches()
+            if has_dispatches:
+                log.info("[WATCHER] Nuevos despachos detectados — aplicando step inicial")
+                apply_step(get_current_step(ALL_DISPATCHES), monitor_ref)
             continue
 
         new_step = get_current_step(ALL_DISPATCHES)
@@ -365,13 +371,6 @@ class GeofenceMonitor:
 
     def process(self, reading: GpsReading):
         now = datetime.now()
-
-        # Tick GPS solo va al archivo, no a consola
-        log.debug(
-            f"GPS  lat={reading.latitude:.6f}  lon={reading.longitude:.6f}"
-            f"  speed={reading.speed:.1f}  t={reading.timestamp}"
-        )
-
         for geo in self.geofences:
             gid    = geo["id"]
             inside = is_inside(reading, geo)
