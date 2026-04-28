@@ -54,9 +54,9 @@ def get_pending_checkpoint(db: Session = Depends(get_db)):
 
 #endpoints passengers
 
-@app.post("/api/passenger")
-def save_passenger(db: Session = Depends(get_db)):
-    return crud.create_passenger(db)
+@app.post("/api/passenger", response_model=PassengerCreate, status_code=201)
+def save_passenger(data: PassengerCreate, db: Session = Depends(get_db)):
+    return crud.create_passenger(db, data)
 
 @app.patch("/api/passenger/{id}")
 def update_status_passenger(id: int, db: Session = Depends(get_db)):

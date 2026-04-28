@@ -1,8 +1,10 @@
 from sqlalchemy.orm import Session
 from models import Gps,CheckPoint,Passenger
-from schemas import GPSDataCreate
+from schemas import GPSDataCreate,PassengerCreate
 from datetime import datetime, timezone
 from datetime import datetime
+from fastapi import HTTPException
+
 def create_gps_data(db: Session, data: GPSDataCreate):
     gps = Gps(**data.dict())
     db.add(gps)
@@ -56,24 +58,18 @@ def upload_pending_checkpoints(db: Session, id: int):
 
     return checkpoint
 
-def create_passenger(db: Session):
-    gps = db.query(Gps)\
-        .order_by(Gps.timestamp.desc())\
-        .first()
-
-    if not gps:
-        return None  # o lanzar excepción
+def create_passenger(db: Session, data: PassengerCreate) -> Passenger:
+    gps = db.query(Gps).order_by(Gps.timestamp.desc()).first()
 
     passenger = Passenger(
-        timestamp=datetime.now(),
-        latitude=gps.latitude,
-        longitude=gps.longitude
+        timestamp=datetime.now(timezone.utc),
+        direction=data.direction,
+        latitude=gps.latitude if gps else 0.0,
+        longitude=gps.longitude if gps else 0.0,
     )
-
     db.add(passenger)
     db.commit()
     db.refresh(passenger)
-
     return passenger
 
 def get_pending_passengers(db:Session):

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel,Field
 from datetime import datetime
 
 class GPSDataCreate(BaseModel):
@@ -22,6 +22,18 @@ class CheckPointCreate(BaseModel):
 
 
 class PassengerCreate(BaseModel):
+    direction: int = Field(0, ge=0)  # 0 entrada, 1 salida
+
+
+class PassengerResponse(BaseModel):
+    id: int
+    timestamp: datetime
+    direction: int
     latitude: float
     longitude: float
-    timestamp: datetime
+    upload: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
