@@ -22,13 +22,15 @@ class CheckPointCreate(BaseModel):
 
 
 class PassengerCreate(BaseModel):
-    direction: int = Field(0, ge=0)  # 0 entrada, 1 salida
+    direction: str
+    door:str
 
 
 class PassengerResponse(BaseModel):
     id: int
     timestamp: datetime
-    direction: int
+    direction: str
+    door:str
     latitude: float
     longitude: float
     upload: bool

@@ -87,51 +87,56 @@ def update_checkpoint_local_register(id):
 # ─────────────────────────────────────────────
 logger.info("Sync service started")
 
-while True:
-    try:
-        pending_passengers = get_pending_passengers()
-        pending_checkpoints = get_pending_checkpoints()
+try:
+    while True:
+        try:
+            pending_passengers = get_pending_passengers()
+            pending_checkpoints = get_pending_checkpoints()
 
-        # -------- PASSENGERS --------
-        for p in pending_passengers:
-            formated_data = {
-                'latitude': float(p['latitude']),
-                'longitude': float(p['longitude']),
-                'register': int(BUS_REGISTER),
-                'timestamp': p['timestamp'],
-            }
-            print(formated_data)
+            # -------- PASSENGERS --------
+            for p in pending_passengers:
+                formated_data = {
+                    'latitude': float(p['latitude']),
+                    'longitude': float(p['longitude']),
+                    'register': int(BUS_REGISTER),
+                    'timestamp': p['timestamp'],
+                    'direction': p['direction'],
+                    'door': p['door']
+                }
+                print(formated_data)
 
-            logger.info(f"Sending passenger {p['id']}")
+                logger.info(f"Sending passenger {p['id']}")
 
-            if simtra.post_passenger(formated_data):
-                if not update_passenger_local_register(p['id']):
-                    logger.warning(f"Passenger {p['id']} sent but NOT updated locally")
+                if simtra.post_passenger(formated_data):
+                    if not update_passenger_local_register(p['id']):
+                        logger.warning(f"Passenger {p['id']} sent but NOT updated locally")
+                else:
+                    logger.warning(f"Failed to send passenger {p['id']}")
+
+            # -------- CHECKPOINTS --------
+            for c in pending_checkpoints:
+                formated_data = {
+                    'id': int(c['checkpoint_id']),
+                    'time_reported': c['timestamp'],
+                }
+
+                logger.info(f"Sending checkpoint {c['id']}")
+
+                if simtra.update_dispatch(formated_data):
+                    if not update_checkpoint_local_register(c['id']):
+                        logger.warning(f"Checkpoint {c['id']} sent but NOT updated locally")
+                else:
+                    logger.warning(f"Failed to send checkpoint {c['id']}")
+
+            # -------- SLEEP INTELIGENTE --------
+            if not pending_passengers and not pending_checkpoints:
+                time.sleep(5)
             else:
-                logger.warning(f"Failed to send passenger {p['id']}")
+                time.sleep(1)
 
-        # -------- CHECKPOINTS --------
-        for c in pending_checkpoints:
-            formated_data = {
-                'id': int(c['checkpoint_id']),
-                'time_reported': c['timestamp'],
-            }
-       
-
-            logger.info(f"Sending checkpoint {c['id']}")
-
-            if simtra.update_dispatch(formated_data):
-                if not update_checkpoint_local_register(c['id']):
-                    logger.warning(f"Checkpoint {c['id']} sent but NOT updated locally")
-            else:
-                logger.warning(f"Failed to send checkpoint {c['id']}")
-
-        # -------- SLEEP INTELIGENTE --------
-        if not pending_passengers and not pending_checkpoints:
+        except Exception as e:
+            logger.critical(f"🔥 Unexpected error in main loop: {e}")
             time.sleep(5)
-        else:
-            time.sleep(1)
 
-    except Exception as e:
-        logger.critical(f"🔥 Unexpected error in main loop: {e}")
-        time.sleep(5)
+except KeyboardInterrupt:
+    logger.info("Sync service stopped by user (Ctrl+C)")

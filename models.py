@@ -27,8 +27,9 @@ class CheckPoint(Base):
 class Passenger(Base):
     __tablename__ = "passenger"
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime(timezone=True), nullable=False)
-    direction = Column(Integer, nullable=False,default=0) #0 para entrada ,1 para salida , se deja numerico por si hay mas casos
+    timestamp = Column(DateTime(timezone=False), nullable=False)
+    direction = Column(String, nullable=False,default='ENTRY') #0 para entrada ,1 para salida , se deja numerico por si hay mas casos
+    door = Column(String,nullable=False,default='FRONT')
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     upload = Column(Boolean, nullable=False, default=False)

@@ -3,7 +3,10 @@ from models import Gps,CheckPoint,Passenger
 from schemas import GPSDataCreate,PassengerCreate
 from datetime import datetime, timezone
 from datetime import datetime
-from fastapi import HTTPException
+
+from zoneinfo import ZoneInfo
+
+ECUADOR_TZ = ZoneInfo("America/Guayaquil")
 
 def create_gps_data(db: Session, data: GPSDataCreate):
     gps = Gps(**data.dict())
@@ -62,8 +65,9 @@ def create_passenger(db: Session, data: PassengerCreate) -> Passenger:
     gps = db.query(Gps).order_by(Gps.timestamp.desc()).first()
 
     passenger = Passenger(
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(ECUADOR_TZ),
         direction=data.direction,
+        door=data.door,
         latitude=gps.latitude if gps else 0.0,
         longitude=gps.longitude if gps else 0.0,
     )
