@@ -101,8 +101,8 @@ def get_passengers_today(db: Session):
     total = query.count()
     
     return {
-        "passengers": passengers,
-        "total": total
+        "total": total,
+        "passengers": passengers
     }
 
 
