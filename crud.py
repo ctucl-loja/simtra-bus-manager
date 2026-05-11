@@ -95,7 +95,7 @@ def get_passengers_today(db: Session):
     query = db.query(Passenger).filter(
         Passenger.timestamp >= start_of_day,
         Passenger.timestamp <= end_of_day
-    )
+    ).order_by(Passenger.timestamp.desc())  # ← Más recientes primero
     
     passengers = query.all()
     total = query.count()
