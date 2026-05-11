@@ -1,0 +1,2371 @@
+{
+    "result": [
+        {
+            "step": 0,
+            "code": "G807",
+            "register": 1624,
+            "date": "2026-04-17",
+            "start_schedule": "06:25:00",
+            "end_schedule": "07:31:00",
+            "line": {
+                "id": 16,
+                "name": "A6",
+                "number": 8,
+                "start_route": "MENFIS",
+                "end_route": "CARIGAN"
+            },
+            "checkpoints": [
+                {
+                    "id": 3683,
+                    "order": 0,
+                    "time": "00:00:00",
+                    "time_calculated": "06:25:00",
+                    "time_reported": "06:24:59",
+                    "point": {
+                        "id": 678,
+                        "name": "MENFIS",
+                        "latitude": -4.010067,
+                        "longitude": -79.229488,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3684,
+                    "order": 1,
+                    "time": "00:09:00",
+                    "time_calculated": "06:34:00",
+                    "time_reported": "06:34:30",
+                    "point": {
+                        "id": 690,
+                        "name": "ENTRADA A MENFIS Y AV. VILLONACO",
+                        "latitude": -3.99843,
+                        "longitude": -79.2205,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3685,
+                    "order": 2,
+                    "time": "00:07:00",
+                    "time_calculated": "06:41:00",
+                    "time_reported": "06:41:02",
+                    "point": {
+                        "id": 689,
+                        "name": "BELLO HORIZONTE",
+                        "latitude": -3.98387902,
+                        "longitude": -79.213212,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3686,
+                    "order": 3,
+                    "time": "00:02:00",
+                    "time_calculated": "06:43:00",
+                    "time_reported": "06:43:03",
+                    "point": {
+                        "id": 688,
+                        "name": "EL BOSQUE",
+                        "latitude": -3.97926088,
+                        "longitude": -79.208,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3687,
+                    "order": 4,
+                    "time": "00:08:00",
+                    "time_calculated": "06:51:00",
+                    "time_reported": "06:50:37",
+                    "point": {
+                        "id": 699,
+                        "name": "REDONDEL BOMBA QUEMADA",
+                        "latitude": -4.001509,
+                        "longitude": -79.207761,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3688,
+                    "order": 5,
+                    "time": "00:02:00",
+                    "time_calculated": "06:53:00",
+                    "time_reported": "06:53:49",
+                    "point": {
+                        "id": 727,
+                        "name": "LA INDEPENDENCIA",
+                        "latitude": -4.000869793663867,
+                        "longitude": -79.20483120431005,
+                        "radius": 40
+                    }
+                },
+                {
+                    "id": 3689,
+                    "order": 6,
+                    "time": "00:03:00",
+                    "time_calculated": "06:56:00",
+                    "time_reported": "06:55:54",
+                    "point": {
+                        "id": 3,
+                        "name": "PARQUE CENTRAL",
+                        "latitude": -3.997392906179897,
+                        "longitude": -79.20510957452761,
+                        "radius": 60
+                    }
+                },
+                {
+                    "id": 3690,
+                    "order": 7,
+                    "time": "00:01:00",
+                    "time_calculated": "06:57:00",
+                    "time_reported": "06:58:16",
+                    "point": {
+                        "id": 705,
+                        "name": "PARQUE BOLIVAR",
+                        "latitude": -3.99528492,
+                        "longitude": -79.2053195,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3691,
+                    "order": 8,
+                    "time": "00:02:30",
+                    "time_calculated": "06:59:30",
+                    "time_reported": "07:00:55",
+                    "point": {
+                        "id": 698,
+                        "name": "PUENTE LEA",
+                        "latitude": -3.99095327,
+                        "longitude": -79.2050693,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3692,
+                    "order": 9,
+                    "time": "00:01:00",
+                    "time_calculated": "07:00:30",
+                    "time_reported": "07:01:57",
+                    "point": {
+                        "id": 697,
+                        "name": "PARADA MAYORISTA",
+                        "latitude": -3.987542,
+                        "longitude": -79.205304,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3693,
+                    "order": 10,
+                    "time": "00:02:30",
+                    "time_calculated": "07:03:00",
+                    "time_reported": "07:05:38",
+                    "point": {
+                        "id": 708,
+                        "name": "EL VALLE",
+                        "latitude": -3.9812,
+                        "longitude": -79.2044858,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3694,
+                    "order": 11,
+                    "time": "00:01:00",
+                    "time_calculated": "07:04:00",
+                    "time_reported": "07:06:12",
+                    "point": {
+                        "id": 709,
+                        "name": "TERMINAL TERRESTRE",
+                        "latitude": -3.978437,
+                        "longitude": -79.204387,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3695,
+                    "order": 12,
+                    "time": "00:05:00",
+                    "time_calculated": "07:09:00",
+                    "time_reported": "07:10:35",
+                    "point": {
+                        "id": 687,
+                        "name": "CRUCE DE RUTAS",
+                        "latitude": -3.970077,
+                        "longitude": -79.209579,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3696,
+                    "order": 13,
+                    "time": "00:07:00",
+                    "time_calculated": "07:16:00",
+                    "time_reported": "07:16:01",
+                    "point": {
+                        "id": 686,
+                        "name": "PUENTE FALLA GEOLOGICA",
+                        "latitude": -3.97000578,
+                        "longitude": -79.22574554,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3697,
+                    "order": 14,
+                    "time": "00:05:00",
+                    "time_calculated": "07:21:00",
+                    "time_reported": "07:20:19",
+                    "point": {
+                        "id": 685,
+                        "name": "REDONDEL VIA CUENCA",
+                        "latitude": -3.961068,
+                        "longitude": -79.238681,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3698,
+                    "order": 15,
+                    "time": "00:01:00",
+                    "time_calculated": "07:22:00",
+                    "time_reported": "07:21:01",
+                    "point": {
+                        "id": 684,
+                        "name": "Y DE CARIGÁN",
+                        "latitude": -3.96031,
+                        "longitude": -79.2403,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3699,
+                    "order": 16,
+                    "time": "00:08:00",
+                    "time_calculated": "07:30:00",
+                    "time_reported": "07:29:05",
+                    "point": {
+                        "id": 683,
+                        "name": "FIN CARIGÁN",
+                        "latitude": -3.95064,
+                        "longitude": -79.234841,
+                        "radius": 50
+                    }
+                }
+            ]
+        },
+        {
+            "step": 1,
+            "code": "G807",
+            "register": 1624,
+            "date": "2026-04-17",
+            "start_schedule": "07:38:00",
+            "end_schedule": "08:39:00",
+            "line": {
+                "id": 17,
+                "name": "A2",
+                "number": 8,
+                "start_route": "CARIGAN",
+                "end_route": "CIUDAD VICTORIA"
+            },
+            "checkpoints": [
+                {
+                    "id": 3700,
+                    "order": 0,
+                    "time": "00:00:00",
+                    "time_calculated": "07:38:00",
+                    "time_reported": "07:37:58",
+                    "point": {
+                        "id": 683,
+                        "name": "FIN CARIGÁN",
+                        "latitude": -3.95064,
+                        "longitude": -79.234841,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3701,
+                    "order": 1,
+                    "time": "00:08:00",
+                    "time_calculated": "07:46:00",
+                    "time_reported": "07:45:42",
+                    "point": {
+                        "id": 684,
+                        "name": "Y DE CARIGÁN",
+                        "latitude": -3.96031,
+                        "longitude": -79.2403,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3702,
+                    "order": 2,
+                    "time": "00:06:00",
+                    "time_calculated": "07:52:00",
+                    "time_reported": "07:52:31",
+                    "point": {
+                        "id": 686,
+                        "name": "PUENTE FALLA GEOLOGICA",
+                        "latitude": -3.97000578,
+                        "longitude": -79.22574554,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3703,
+                    "order": 3,
+                    "time": "00:06:00",
+                    "time_calculated": "07:58:00",
+                    "time_reported": "07:58:39",
+                    "point": {
+                        "id": 687,
+                        "name": "CRUCE DE RUTAS",
+                        "latitude": -3.970077,
+                        "longitude": -79.209579,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3704,
+                    "order": 4,
+                    "time": "00:03:00",
+                    "time_calculated": "08:01:00",
+                    "time_reported": "08:01:18",
+                    "point": {
+                        "id": 682,
+                        "name": "SANDY",
+                        "latitude": -3.972441,
+                        "longitude": -79.206174,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3705,
+                    "order": 5,
+                    "time": "00:01:00",
+                    "time_calculated": "08:02:00",
+                    "time_reported": "08:02:47",
+                    "point": {
+                        "id": 709,
+                        "name": "TERMINAL TERRESTRE",
+                        "latitude": -3.978437,
+                        "longitude": -79.204387,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3706,
+                    "order": 6,
+                    "time": "00:01:00",
+                    "time_calculated": "08:03:00",
+                    "time_reported": "08:03:45",
+                    "point": {
+                        "id": 708,
+                        "name": "EL VALLE",
+                        "latitude": -3.9812,
+                        "longitude": -79.2044858,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3707,
+                    "order": 7,
+                    "time": "00:01:00",
+                    "time_calculated": "08:04:00",
+                    "time_reported": "08:05:22",
+                    "point": {
+                        "id": 707,
+                        "name": "LOJANA DE TURISMO",
+                        "latitude": -3.985,
+                        "longitude": -79.206032,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3708,
+                    "order": 8,
+                    "time": "00:02:00",
+                    "time_calculated": "08:06:00",
+                    "time_reported": "08:07:06",
+                    "point": {
+                        "id": 706,
+                        "name": "PUENTE BOLÍVAR",
+                        "latitude": -3.99016465,
+                        "longitude": -79.2053751,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3709,
+                    "order": 9,
+                    "time": "00:03:00",
+                    "time_calculated": "08:09:00",
+                    "time_reported": "08:08:55",
+                    "point": {
+                        "id": 705,
+                        "name": "PARQUE BOLIVAR",
+                        "latitude": -3.99528492,
+                        "longitude": -79.2053195,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3710,
+                    "order": 10,
+                    "time": "00:01:00",
+                    "time_calculated": "08:10:00",
+                    "time_reported": "08:10:31",
+                    "point": {
+                        "id": 3,
+                        "name": "PARQUE CENTRAL",
+                        "latitude": -3.997392906179897,
+                        "longitude": -79.20510957452761,
+                        "radius": 60
+                    }
+                },
+                {
+                    "id": 3711,
+                    "order": 11,
+                    "time": "00:03:00",
+                    "time_calculated": "08:13:00",
+                    "time_reported": "08:13:22",
+                    "point": {
+                        "id": 727,
+                        "name": "LA INDEPENDENCIA",
+                        "latitude": -4.000869793663867,
+                        "longitude": -79.20483120431005,
+                        "radius": 40
+                    }
+                },
+                {
+                    "id": 3712,
+                    "order": 12,
+                    "time": "00:03:00",
+                    "time_calculated": "08:16:00",
+                    "time_reported": "08:14:53",
+                    "point": {
+                        "id": 704,
+                        "name": "MERCADILLO Y JOSÉ M. PEÑA",
+                        "latitude": -4.00148133,
+                        "longitude": -79.206308,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3713,
+                    "order": 13,
+                    "time": "00:06:00",
+                    "time_calculated": "08:22:00",
+                    "time_reported": "08:19:37",
+                    "point": {
+                        "id": 681,
+                        "name": "ADOLFO VALAREZO",
+                        "latitude": -3.99281852,
+                        "longitude": -79.21002566,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3714,
+                    "order": 14,
+                    "time": "00:10:00",
+                    "time_calculated": "08:32:00",
+                    "time_reported": "08:31:40",
+                    "point": {
+                        "id": 690,
+                        "name": "ENTRADA A MENFIS Y AV. VILLONACO",
+                        "latitude": -3.99843,
+                        "longitude": -79.2205,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3715,
+                    "order": 15,
+                    "time": "00:03:00",
+                    "time_calculated": "08:35:00",
+                    "time_reported": "08:33:24",
+                    "point": {
+                        "id": 691,
+                        "name": "ALFREDO P DIEZCANSECO Y AV. VILLONACO",
+                        "latitude": -3.99948275,
+                        "longitude": -79.22786861,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3716,
+                    "order": 16,
+                    "time": "00:07:00",
+                    "time_calculated": "08:42:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 693,
+                        "name": "PUNTO CERO CIUDAD VICTORIA",
+                        "latitude": -4.00158308,
+                        "longitude": -79.23373975,
+                        "radius": 50
+                    }
+                }
+            ]
+        },
+        {
+            "step": 2,
+            "code": "G807",
+            "register": 1624,
+            "date": "2026-04-17",
+            "start_schedule": "09:12:00",
+            "end_schedule": "10:18:00",
+            "line": {
+                "id": 12,
+                "name": "A3",
+                "number": 8,
+                "start_route": "CIUDAD VICTORIA",
+                "end_route": "TENERIA"
+            },
+            "checkpoints": [
+                {
+                    "id": 3717,
+                    "order": 0,
+                    "time": "00:00:00",
+                    "time_calculated": "09:12:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 693,
+                        "name": "PUNTO CERO CIUDAD VICTORIA",
+                        "latitude": -4.00158308,
+                        "longitude": -79.23373975,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3718,
+                    "order": 1,
+                    "time": "00:01:00",
+                    "time_calculated": "09:13:00",
+                    "time_reported": "09:12:48",
+                    "point": {
+                        "id": 692,
+                        "name": "SALIDA CIUDAD VICTORIA",
+                        "latitude": -4.000206,
+                        "longitude": -79.232376,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3719,
+                    "order": 2,
+                    "time": "00:05:00",
+                    "time_calculated": "09:18:00",
+                    "time_reported": "09:17:40",
+                    "point": {
+                        "id": 691,
+                        "name": "ALFREDO P DIEZCANSECO Y AV. VILLONACO",
+                        "latitude": -3.99948275,
+                        "longitude": -79.22786861,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3720,
+                    "order": 3,
+                    "time": "00:03:00",
+                    "time_calculated": "09:21:00",
+                    "time_reported": "09:20:43",
+                    "point": {
+                        "id": 690,
+                        "name": "ENTRADA A MENFIS Y AV. VILLONACO",
+                        "latitude": -3.99843,
+                        "longitude": -79.2205,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3721,
+                    "order": 4,
+                    "time": "00:08:00",
+                    "time_calculated": "09:29:00",
+                    "time_reported": "09:27:44",
+                    "point": {
+                        "id": 689,
+                        "name": "BELLO HORIZONTE",
+                        "latitude": -3.98387902,
+                        "longitude": -79.213212,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3722,
+                    "order": 5,
+                    "time": "00:02:00",
+                    "time_calculated": "09:31:00",
+                    "time_reported": "09:30:22",
+                    "point": {
+                        "id": 688,
+                        "name": "EL BOSQUE",
+                        "latitude": -3.97926088,
+                        "longitude": -79.208,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3723,
+                    "order": 6,
+                    "time": "00:08:00",
+                    "time_calculated": "09:39:00",
+                    "time_reported": "09:38:17",
+                    "point": {
+                        "id": 699,
+                        "name": "REDONDEL BOMBA QUEMADA",
+                        "latitude": -4.001509,
+                        "longitude": -79.207761,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3724,
+                    "order": 7,
+                    "time": "00:02:00",
+                    "time_calculated": "09:41:00",
+                    "time_reported": "09:41:29",
+                    "point": {
+                        "id": 727,
+                        "name": "LA INDEPENDENCIA",
+                        "latitude": -4.000869793663867,
+                        "longitude": -79.20483120431005,
+                        "radius": 40
+                    }
+                },
+                {
+                    "id": 3725,
+                    "order": 8,
+                    "time": "00:03:00",
+                    "time_calculated": "09:44:00",
+                    "time_reported": "09:43:33",
+                    "point": {
+                        "id": 3,
+                        "name": "PARQUE CENTRAL",
+                        "latitude": -3.997392906179897,
+                        "longitude": -79.20510957452761,
+                        "radius": 60
+                    }
+                },
+                {
+                    "id": 3726,
+                    "order": 9,
+                    "time": "00:01:00",
+                    "time_calculated": "09:45:00",
+                    "time_reported": "09:45:27",
+                    "point": {
+                        "id": 705,
+                        "name": "PARQUE BOLIVAR",
+                        "latitude": -3.99528492,
+                        "longitude": -79.2053195,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3727,
+                    "order": 10,
+                    "time": "00:02:30",
+                    "time_calculated": "09:47:30",
+                    "time_reported": "09:48:01",
+                    "point": {
+                        "id": 698,
+                        "name": "PUENTE LEA",
+                        "latitude": -3.99095327,
+                        "longitude": -79.2050693,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3728,
+                    "order": 11,
+                    "time": "00:01:00",
+                    "time_calculated": "09:48:30",
+                    "time_reported": "09:49:08",
+                    "point": {
+                        "id": 697,
+                        "name": "PARADA MAYORISTA",
+                        "latitude": -3.987542,
+                        "longitude": -79.205304,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3729,
+                    "order": 12,
+                    "time": "00:02:30",
+                    "time_calculated": "09:51:00",
+                    "time_reported": "09:52:24",
+                    "point": {
+                        "id": 708,
+                        "name": "EL VALLE",
+                        "latitude": -3.9812,
+                        "longitude": -79.2044858,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3730,
+                    "order": 13,
+                    "time": "00:01:00",
+                    "time_calculated": "09:52:00",
+                    "time_reported": "09:53:14",
+                    "point": {
+                        "id": 709,
+                        "name": "TERMINAL TERRESTRE",
+                        "latitude": -3.978437,
+                        "longitude": -79.204387,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3731,
+                    "order": 14,
+                    "time": "00:05:00",
+                    "time_calculated": "09:57:00",
+                    "time_reported": "09:56:52",
+                    "point": {
+                        "id": 687,
+                        "name": "CRUCE DE RUTAS",
+                        "latitude": -3.970077,
+                        "longitude": -79.209579,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3732,
+                    "order": 15,
+                    "time": "00:07:00",
+                    "time_calculated": "10:04:00",
+                    "time_reported": "10:03:18",
+                    "point": {
+                        "id": 686,
+                        "name": "PUENTE FALLA GEOLOGICA",
+                        "latitude": -3.97000578,
+                        "longitude": -79.22574554,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3733,
+                    "order": 16,
+                    "time": "00:05:00",
+                    "time_calculated": "10:09:00",
+                    "time_reported": "10:07:53",
+                    "point": {
+                        "id": 685,
+                        "name": "REDONDEL VIA CUENCA",
+                        "latitude": -3.961068,
+                        "longitude": -79.238681,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3734,
+                    "order": 17,
+                    "time": "00:01:00",
+                    "time_calculated": "10:10:00",
+                    "time_reported": "10:08:39",
+                    "point": {
+                        "id": 684,
+                        "name": "Y DE CARIGÁN",
+                        "latitude": -3.96031,
+                        "longitude": -79.2403,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3735,
+                    "order": 18,
+                    "time": "00:08:00",
+                    "time_calculated": "10:18:00",
+                    "time_reported": "10:15:38",
+                    "point": {
+                        "id": 680,
+                        "name": "TENERIA",
+                        "latitude": -3.940617,
+                        "longitude": -79.253533,
+                        "radius": 50
+                    }
+                }
+            ]
+        },
+        {
+            "step": 3,
+            "code": "G807",
+            "register": 1624,
+            "date": "2026-04-17",
+            "start_schedule": "10:25:00",
+            "end_schedule": "11:26:00",
+            "line": {
+                "id": 13,
+                "name": "A4",
+                "number": 8,
+                "start_route": "TENERIA",
+                "end_route": "CIUDAD VICTORIA"
+            },
+            "checkpoints": [
+                {
+                    "id": 3736,
+                    "order": 0,
+                    "time": "00:00:00",
+                    "time_calculated": "10:25:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 680,
+                        "name": "TENERIA",
+                        "latitude": -3.940617,
+                        "longitude": -79.253533,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3737,
+                    "order": 1,
+                    "time": "00:08:00",
+                    "time_calculated": "10:33:00",
+                    "time_reported": "10:33:04",
+                    "point": {
+                        "id": 684,
+                        "name": "Y DE CARIGÁN",
+                        "latitude": -3.96031,
+                        "longitude": -79.2403,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3738,
+                    "order": 2,
+                    "time": "00:06:00",
+                    "time_calculated": "10:39:00",
+                    "time_reported": "10:39:01",
+                    "point": {
+                        "id": 686,
+                        "name": "PUENTE FALLA GEOLOGICA",
+                        "latitude": -3.97000578,
+                        "longitude": -79.22574554,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3739,
+                    "order": 3,
+                    "time": "00:06:00",
+                    "time_calculated": "10:45:00",
+                    "time_reported": "10:45:04",
+                    "point": {
+                        "id": 687,
+                        "name": "CRUCE DE RUTAS",
+                        "latitude": -3.970077,
+                        "longitude": -79.209579,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3740,
+                    "order": 4,
+                    "time": "00:03:00",
+                    "time_calculated": "10:48:00",
+                    "time_reported": "10:47:55",
+                    "point": {
+                        "id": 682,
+                        "name": "SANDY",
+                        "latitude": -3.972441,
+                        "longitude": -79.206174,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3741,
+                    "order": 5,
+                    "time": "00:01:00",
+                    "time_calculated": "10:49:00",
+                    "time_reported": "10:49:56",
+                    "point": {
+                        "id": 709,
+                        "name": "TERMINAL TERRESTRE",
+                        "latitude": -3.978437,
+                        "longitude": -79.204387,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3742,
+                    "order": 6,
+                    "time": "00:01:00",
+                    "time_calculated": "10:50:00",
+                    "time_reported": "10:51:16",
+                    "point": {
+                        "id": 708,
+                        "name": "EL VALLE",
+                        "latitude": -3.9812,
+                        "longitude": -79.2044858,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3743,
+                    "order": 7,
+                    "time": "00:01:00",
+                    "time_calculated": "10:51:00",
+                    "time_reported": "10:52:39",
+                    "point": {
+                        "id": 707,
+                        "name": "LOJANA DE TURISMO",
+                        "latitude": -3.985,
+                        "longitude": -79.206032,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3744,
+                    "order": 8,
+                    "time": "00:02:00",
+                    "time_calculated": "10:53:00",
+                    "time_reported": "10:55:26",
+                    "point": {
+                        "id": 706,
+                        "name": "PUENTE BOLÍVAR",
+                        "latitude": -3.99016465,
+                        "longitude": -79.2053751,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3745,
+                    "order": 9,
+                    "time": "00:03:00",
+                    "time_calculated": "10:56:00",
+                    "time_reported": "10:58:22",
+                    "point": {
+                        "id": 705,
+                        "name": "PARQUE BOLIVAR",
+                        "latitude": -3.99528492,
+                        "longitude": -79.2053195,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3746,
+                    "order": 10,
+                    "time": "00:01:00",
+                    "time_calculated": "10:57:00",
+                    "time_reported": "10:59:50",
+                    "point": {
+                        "id": 3,
+                        "name": "PARQUE CENTRAL",
+                        "latitude": -3.997392906179897,
+                        "longitude": -79.20510957452761,
+                        "radius": 60
+                    }
+                },
+                {
+                    "id": 3747,
+                    "order": 11,
+                    "time": "00:03:00",
+                    "time_calculated": "11:00:00",
+                    "time_reported": "11:02:16",
+                    "point": {
+                        "id": 727,
+                        "name": "LA INDEPENDENCIA",
+                        "latitude": -4.000869793663867,
+                        "longitude": -79.20483120431005,
+                        "radius": 40
+                    }
+                },
+                {
+                    "id": 3748,
+                    "order": 12,
+                    "time": "00:03:00",
+                    "time_calculated": "11:03:00",
+                    "time_reported": "11:04:17",
+                    "point": {
+                        "id": 704,
+                        "name": "MERCADILLO Y JOSÉ M. PEÑA",
+                        "latitude": -4.00148133,
+                        "longitude": -79.206308,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3749,
+                    "order": 13,
+                    "time": "00:06:00",
+                    "time_calculated": "11:09:00",
+                    "time_reported": "11:08:00",
+                    "point": {
+                        "id": 681,
+                        "name": "ADOLFO VALAREZO",
+                        "latitude": -3.99281852,
+                        "longitude": -79.21002566,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3750,
+                    "order": 14,
+                    "time": "00:10:00",
+                    "time_calculated": "11:19:00",
+                    "time_reported": "11:20:40",
+                    "point": {
+                        "id": 690,
+                        "name": "ENTRADA A MENFIS Y AV. VILLONACO",
+                        "latitude": -3.99843,
+                        "longitude": -79.2205,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3751,
+                    "order": 15,
+                    "time": "00:03:00",
+                    "time_calculated": "11:22:00",
+                    "time_reported": "11:22:53",
+                    "point": {
+                        "id": 691,
+                        "name": "ALFREDO P DIEZCANSECO Y AV. VILLONACO",
+                        "latitude": -3.99948275,
+                        "longitude": -79.22786861,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3752,
+                    "order": 16,
+                    "time": "00:07:00",
+                    "time_calculated": "11:29:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 676,
+                        "name": "FINAL CIUDAD VICTORIA",
+                        "latitude": -4.000935,
+                        "longitude": -79.231924,
+                        "radius": 50
+                    }
+                }
+            ]
+        },
+        {
+            "step": 4,
+            "code": "G807",
+            "register": 1624,
+            "date": "2026-04-17",
+            "start_schedule": "12:32:00",
+            "end_schedule": "13:38:00",
+            "line": {
+                "id": 16,
+                "name": "A6",
+                "number": 8,
+                "start_route": "MENFIS",
+                "end_route": "CARIGAN"
+            },
+            "checkpoints": [
+                {
+                    "id": 3753,
+                    "order": 0,
+                    "time": "00:00:00",
+                    "time_calculated": "12:32:00",
+                    "time_reported": "12:32:00",
+                    "point": {
+                        "id": 678,
+                        "name": "MENFIS",
+                        "latitude": -4.010067,
+                        "longitude": -79.229488,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3754,
+                    "order": 1,
+                    "time": "00:09:00",
+                    "time_calculated": "12:41:00",
+                    "time_reported": "12:40:49",
+                    "point": {
+                        "id": 690,
+                        "name": "ENTRADA A MENFIS Y AV. VILLONACO",
+                        "latitude": -3.99843,
+                        "longitude": -79.2205,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3755,
+                    "order": 2,
+                    "time": "00:07:00",
+                    "time_calculated": "12:48:00",
+                    "time_reported": "12:47:42",
+                    "point": {
+                        "id": 689,
+                        "name": "BELLO HORIZONTE",
+                        "latitude": -3.98387902,
+                        "longitude": -79.213212,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3756,
+                    "order": 3,
+                    "time": "00:02:00",
+                    "time_calculated": "12:50:00",
+                    "time_reported": "12:50:17",
+                    "point": {
+                        "id": 688,
+                        "name": "EL BOSQUE",
+                        "latitude": -3.97926088,
+                        "longitude": -79.208,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3757,
+                    "order": 4,
+                    "time": "00:08:00",
+                    "time_calculated": "12:58:00",
+                    "time_reported": "12:57:55",
+                    "point": {
+                        "id": 699,
+                        "name": "REDONDEL BOMBA QUEMADA",
+                        "latitude": -4.001509,
+                        "longitude": -79.207761,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3758,
+                    "order": 5,
+                    "time": "00:02:00",
+                    "time_calculated": "13:00:00",
+                    "time_reported": "13:01:38",
+                    "point": {
+                        "id": 727,
+                        "name": "LA INDEPENDENCIA",
+                        "latitude": -4.000869793663867,
+                        "longitude": -79.20483120431005,
+                        "radius": 40
+                    }
+                },
+                {
+                    "id": 3759,
+                    "order": 6,
+                    "time": "00:03:00",
+                    "time_calculated": "13:03:00",
+                    "time_reported": "13:03:10",
+                    "point": {
+                        "id": 3,
+                        "name": "PARQUE CENTRAL",
+                        "latitude": -3.997392906179897,
+                        "longitude": -79.20510957452761,
+                        "radius": 60
+                    }
+                },
+                {
+                    "id": 3760,
+                    "order": 7,
+                    "time": "00:01:00",
+                    "time_calculated": "13:04:00",
+                    "time_reported": "13:04:50",
+                    "point": {
+                        "id": 705,
+                        "name": "PARQUE BOLIVAR",
+                        "latitude": -3.99528492,
+                        "longitude": -79.2053195,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3761,
+                    "order": 8,
+                    "time": "00:02:30",
+                    "time_calculated": "13:06:30",
+                    "time_reported": "13:08:20",
+                    "point": {
+                        "id": 698,
+                        "name": "PUENTE LEA",
+                        "latitude": -3.99095327,
+                        "longitude": -79.2050693,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3762,
+                    "order": 9,
+                    "time": "00:01:00",
+                    "time_calculated": "13:07:30",
+                    "time_reported": "13:09:13",
+                    "point": {
+                        "id": 697,
+                        "name": "PARADA MAYORISTA",
+                        "latitude": -3.987542,
+                        "longitude": -79.205304,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3763,
+                    "order": 10,
+                    "time": "00:02:30",
+                    "time_calculated": "13:10:00",
+                    "time_reported": "13:13:03",
+                    "point": {
+                        "id": 708,
+                        "name": "EL VALLE",
+                        "latitude": -3.9812,
+                        "longitude": -79.2044858,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3764,
+                    "order": 11,
+                    "time": "00:01:00",
+                    "time_calculated": "13:11:00",
+                    "time_reported": "13:14:18",
+                    "point": {
+                        "id": 709,
+                        "name": "TERMINAL TERRESTRE",
+                        "latitude": -3.978437,
+                        "longitude": -79.204387,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3765,
+                    "order": 12,
+                    "time": "00:05:00",
+                    "time_calculated": "13:16:00",
+                    "time_reported": "13:19:24",
+                    "point": {
+                        "id": 687,
+                        "name": "CRUCE DE RUTAS",
+                        "latitude": -3.970077,
+                        "longitude": -79.209579,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3766,
+                    "order": 13,
+                    "time": "00:07:00",
+                    "time_calculated": "13:23:00",
+                    "time_reported": "13:27:19",
+                    "point": {
+                        "id": 686,
+                        "name": "PUENTE FALLA GEOLOGICA",
+                        "latitude": -3.97000578,
+                        "longitude": -79.22574554,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3767,
+                    "order": 14,
+                    "time": "00:05:00",
+                    "time_calculated": "13:28:00",
+                    "time_reported": "13:32:28",
+                    "point": {
+                        "id": 685,
+                        "name": "REDONDEL VIA CUENCA",
+                        "latitude": -3.961068,
+                        "longitude": -79.238681,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3768,
+                    "order": 15,
+                    "time": "00:01:00",
+                    "time_calculated": "13:29:00",
+                    "time_reported": "13:33:23",
+                    "point": {
+                        "id": 684,
+                        "name": "Y DE CARIGÁN",
+                        "latitude": -3.96031,
+                        "longitude": -79.2403,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3769,
+                    "order": 16,
+                    "time": "00:08:00",
+                    "time_calculated": "13:37:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 683,
+                        "name": "FIN CARIGÁN",
+                        "latitude": -3.95064,
+                        "longitude": -79.234841,
+                        "radius": 50
+                    }
+                }
+            ]
+        },
+        {
+            "step": 5,
+            "code": "G807",
+            "register": 1624,
+            "date": "2026-04-17",
+            "start_schedule": "13:45:00",
+            "end_schedule": "14:46:00",
+            "line": {
+                "id": 17,
+                "name": "A2",
+                "number": 8,
+                "start_route": "CARIGAN",
+                "end_route": "CIUDAD VICTORIA"
+            },
+            "checkpoints": [
+                {
+                    "id": 3770,
+                    "order": 0,
+                    "time": "00:00:00",
+                    "time_calculated": "13:45:00",
+                    "time_reported": "13:45:22",
+                    "point": {
+                        "id": 683,
+                        "name": "FIN CARIGÁN",
+                        "latitude": -3.95064,
+                        "longitude": -79.234841,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3771,
+                    "order": 1,
+                    "time": "00:08:00",
+                    "time_calculated": "13:53:00",
+                    "time_reported": "13:52:48",
+                    "point": {
+                        "id": 684,
+                        "name": "Y DE CARIGÁN",
+                        "latitude": -3.96031,
+                        "longitude": -79.2403,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3772,
+                    "order": 2,
+                    "time": "00:06:00",
+                    "time_calculated": "13:59:00",
+                    "time_reported": "13:59:46",
+                    "point": {
+                        "id": 686,
+                        "name": "PUENTE FALLA GEOLOGICA",
+                        "latitude": -3.97000578,
+                        "longitude": -79.22574554,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3773,
+                    "order": 3,
+                    "time": "00:06:00",
+                    "time_calculated": "14:05:00",
+                    "time_reported": "14:06:00",
+                    "point": {
+                        "id": 687,
+                        "name": "CRUCE DE RUTAS",
+                        "latitude": -3.970077,
+                        "longitude": -79.209579,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3774,
+                    "order": 4,
+                    "time": "00:03:00",
+                    "time_calculated": "14:08:00",
+                    "time_reported": "14:08:02",
+                    "point": {
+                        "id": 682,
+                        "name": "SANDY",
+                        "latitude": -3.972441,
+                        "longitude": -79.206174,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3775,
+                    "order": 5,
+                    "time": "00:01:00",
+                    "time_calculated": "14:09:00",
+                    "time_reported": "14:09:43",
+                    "point": {
+                        "id": 709,
+                        "name": "TERMINAL TERRESTRE",
+                        "latitude": -3.978437,
+                        "longitude": -79.204387,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3776,
+                    "order": 6,
+                    "time": "00:01:00",
+                    "time_calculated": "14:10:00",
+                    "time_reported": "14:11:44",
+                    "point": {
+                        "id": 708,
+                        "name": "EL VALLE",
+                        "latitude": -3.9812,
+                        "longitude": -79.2044858,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3777,
+                    "order": 7,
+                    "time": "00:01:00",
+                    "time_calculated": "14:11:00",
+                    "time_reported": "14:13:04",
+                    "point": {
+                        "id": 707,
+                        "name": "LOJANA DE TURISMO",
+                        "latitude": -3.985,
+                        "longitude": -79.206032,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3778,
+                    "order": 8,
+                    "time": "00:02:00",
+                    "time_calculated": "14:13:00",
+                    "time_reported": "14:15:13",
+                    "point": {
+                        "id": 706,
+                        "name": "PUENTE BOLÍVAR",
+                        "latitude": -3.99016465,
+                        "longitude": -79.2053751,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3779,
+                    "order": 9,
+                    "time": "00:03:00",
+                    "time_calculated": "14:16:00",
+                    "time_reported": "14:19:07",
+                    "point": {
+                        "id": 705,
+                        "name": "PARQUE BOLIVAR",
+                        "latitude": -3.99528492,
+                        "longitude": -79.2053195,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3780,
+                    "order": 10,
+                    "time": "00:01:00",
+                    "time_calculated": "14:17:00",
+                    "time_reported": "14:20:52",
+                    "point": {
+                        "id": 3,
+                        "name": "PARQUE CENTRAL",
+                        "latitude": -3.997392906179897,
+                        "longitude": -79.20510957452761,
+                        "radius": 60
+                    }
+                },
+                {
+                    "id": 3781,
+                    "order": 11,
+                    "time": "00:03:00",
+                    "time_calculated": "14:20:00",
+                    "time_reported": "14:24:17",
+                    "point": {
+                        "id": 727,
+                        "name": "LA INDEPENDENCIA",
+                        "latitude": -4.000869793663867,
+                        "longitude": -79.20483120431005,
+                        "radius": 40
+                    }
+                },
+                {
+                    "id": 3782,
+                    "order": 12,
+                    "time": "00:03:00",
+                    "time_calculated": "14:23:00",
+                    "time_reported": "14:25:36",
+                    "point": {
+                        "id": 704,
+                        "name": "MERCADILLO Y JOSÉ M. PEÑA",
+                        "latitude": -4.00148133,
+                        "longitude": -79.206308,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3783,
+                    "order": 13,
+                    "time": "00:06:00",
+                    "time_calculated": "14:29:00",
+                    "time_reported": "14:29:24",
+                    "point": {
+                        "id": 681,
+                        "name": "ADOLFO VALAREZO",
+                        "latitude": -3.99281852,
+                        "longitude": -79.21002566,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3784,
+                    "order": 14,
+                    "time": "00:10:00",
+                    "time_calculated": "14:39:00",
+                    "time_reported": "14:41:50",
+                    "point": {
+                        "id": 690,
+                        "name": "ENTRADA A MENFIS Y AV. VILLONACO",
+                        "latitude": -3.99843,
+                        "longitude": -79.2205,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3785,
+                    "order": 15,
+                    "time": "00:03:00",
+                    "time_calculated": "14:42:00",
+                    "time_reported": "14:44:12",
+                    "point": {
+                        "id": 691,
+                        "name": "ALFREDO P DIEZCANSECO Y AV. VILLONACO",
+                        "latitude": -3.99948275,
+                        "longitude": -79.22786861,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3786,
+                    "order": 16,
+                    "time": "00:07:00",
+                    "time_calculated": "14:49:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 693,
+                        "name": "PUNTO CERO CIUDAD VICTORIA",
+                        "latitude": -4.00158308,
+                        "longitude": -79.23373975,
+                        "radius": 50
+                    }
+                }
+            ]
+        },
+        {
+            "step": 6,
+            "code": "G807",
+            "register": 1624,
+            "date": "2026-04-17",
+            "start_schedule": "15:24:00",
+            "end_schedule": "16:30:00",
+            "line": {
+                "id": 12,
+                "name": "A3",
+                "number": 8,
+                "start_route": "CIUDAD VICTORIA",
+                "end_route": "TENERIA"
+            },
+            "checkpoints": [
+                {
+                    "id": 3787,
+                    "order": 0,
+                    "time": "00:00:00",
+                    "time_calculated": "15:24:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 693,
+                        "name": "PUNTO CERO CIUDAD VICTORIA",
+                        "latitude": -4.00158308,
+                        "longitude": -79.23373975,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3788,
+                    "order": 1,
+                    "time": "00:01:00",
+                    "time_calculated": "15:25:00",
+                    "time_reported": "15:25:16",
+                    "point": {
+                        "id": 692,
+                        "name": "SALIDA CIUDAD VICTORIA",
+                        "latitude": -4.000206,
+                        "longitude": -79.232376,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3789,
+                    "order": 2,
+                    "time": "00:05:00",
+                    "time_calculated": "15:30:00",
+                    "time_reported": "15:29:43",
+                    "point": {
+                        "id": 691,
+                        "name": "ALFREDO P DIEZCANSECO Y AV. VILLONACO",
+                        "latitude": -3.99948275,
+                        "longitude": -79.22786861,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3790,
+                    "order": 3,
+                    "time": "00:03:00",
+                    "time_calculated": "15:33:00",
+                    "time_reported": "15:32:56",
+                    "point": {
+                        "id": 690,
+                        "name": "ENTRADA A MENFIS Y AV. VILLONACO",
+                        "latitude": -3.99843,
+                        "longitude": -79.2205,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3791,
+                    "order": 4,
+                    "time": "00:08:00",
+                    "time_calculated": "15:41:00",
+                    "time_reported": "15:39:40",
+                    "point": {
+                        "id": 689,
+                        "name": "BELLO HORIZONTE",
+                        "latitude": -3.98387902,
+                        "longitude": -79.213212,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3792,
+                    "order": 5,
+                    "time": "00:02:00",
+                    "time_calculated": "15:43:00",
+                    "time_reported": "15:42:12",
+                    "point": {
+                        "id": 688,
+                        "name": "EL BOSQUE",
+                        "latitude": -3.97926088,
+                        "longitude": -79.208,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3793,
+                    "order": 6,
+                    "time": "00:08:00",
+                    "time_calculated": "15:51:00",
+                    "time_reported": "15:50:00",
+                    "point": {
+                        "id": 699,
+                        "name": "REDONDEL BOMBA QUEMADA",
+                        "latitude": -4.001509,
+                        "longitude": -79.207761,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3794,
+                    "order": 7,
+                    "time": "00:02:00",
+                    "time_calculated": "15:53:00",
+                    "time_reported": "15:53:22",
+                    "point": {
+                        "id": 727,
+                        "name": "LA INDEPENDENCIA",
+                        "latitude": -4.000869793663867,
+                        "longitude": -79.20483120431005,
+                        "radius": 40
+                    }
+                },
+                {
+                    "id": 3795,
+                    "order": 8,
+                    "time": "00:03:00",
+                    "time_calculated": "15:56:00",
+                    "time_reported": "15:55:20",
+                    "point": {
+                        "id": 3,
+                        "name": "PARQUE CENTRAL",
+                        "latitude": -3.997392906179897,
+                        "longitude": -79.20510957452761,
+                        "radius": 60
+                    }
+                },
+                {
+                    "id": 3796,
+                    "order": 9,
+                    "time": "00:01:00",
+                    "time_calculated": "15:57:00",
+                    "time_reported": "15:58:07",
+                    "point": {
+                        "id": 705,
+                        "name": "PARQUE BOLIVAR",
+                        "latitude": -3.99528492,
+                        "longitude": -79.2053195,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3797,
+                    "order": 10,
+                    "time": "00:02:30",
+                    "time_calculated": "15:59:30",
+                    "time_reported": "16:00:23",
+                    "point": {
+                        "id": 698,
+                        "name": "PUENTE LEA",
+                        "latitude": -3.99095327,
+                        "longitude": -79.2050693,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3798,
+                    "order": 11,
+                    "time": "00:01:00",
+                    "time_calculated": "16:00:30",
+                    "time_reported": "16:01:30",
+                    "point": {
+                        "id": 697,
+                        "name": "PARADA MAYORISTA",
+                        "latitude": -3.987542,
+                        "longitude": -79.205304,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3799,
+                    "order": 12,
+                    "time": "00:02:30",
+                    "time_calculated": "16:03:00",
+                    "time_reported": "16:05:03",
+                    "point": {
+                        "id": 708,
+                        "name": "EL VALLE",
+                        "latitude": -3.9812,
+                        "longitude": -79.2044858,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3800,
+                    "order": 13,
+                    "time": "00:01:00",
+                    "time_calculated": "16:04:00",
+                    "time_reported": "16:06:01",
+                    "point": {
+                        "id": 709,
+                        "name": "TERMINAL TERRESTRE",
+                        "latitude": -3.978437,
+                        "longitude": -79.204387,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3801,
+                    "order": 14,
+                    "time": "00:05:00",
+                    "time_calculated": "16:09:00",
+                    "time_reported": "16:10:29",
+                    "point": {
+                        "id": 687,
+                        "name": "CRUCE DE RUTAS",
+                        "latitude": -3.970077,
+                        "longitude": -79.209579,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3802,
+                    "order": 15,
+                    "time": "00:07:00",
+                    "time_calculated": "16:16:00",
+                    "time_reported": "16:16:42",
+                    "point": {
+                        "id": 686,
+                        "name": "PUENTE FALLA GEOLOGICA",
+                        "latitude": -3.97000578,
+                        "longitude": -79.22574554,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3803,
+                    "order": 16,
+                    "time": "00:05:00",
+                    "time_calculated": "16:21:00",
+                    "time_reported": "16:21:54",
+                    "point": {
+                        "id": 685,
+                        "name": "REDONDEL VIA CUENCA",
+                        "latitude": -3.961068,
+                        "longitude": -79.238681,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3804,
+                    "order": 17,
+                    "time": "00:01:00",
+                    "time_calculated": "16:22:00",
+                    "time_reported": "16:22:32",
+                    "point": {
+                        "id": 684,
+                        "name": "Y DE CARIGÁN",
+                        "latitude": -3.96031,
+                        "longitude": -79.2403,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3805,
+                    "order": 18,
+                    "time": "00:08:00",
+                    "time_calculated": "16:30:00",
+                    "time_reported": "16:29:46",
+                    "point": {
+                        "id": 680,
+                        "name": "TENERIA",
+                        "latitude": -3.940617,
+                        "longitude": -79.253533,
+                        "radius": 50
+                    }
+                }
+            ]
+        },
+        {
+            "step": 7,
+            "code": "G807",
+            "register": 1624,
+            "date": "2026-04-17",
+            "start_schedule": "16:37:00",
+            "end_schedule": "17:41:00",
+            "line": {
+                "id": 59,
+                "name": "B3",
+                "number": 8,
+                "start_route": "TENERIA",
+                "end_route": "MENFIS"
+            },
+            "checkpoints": [
+                {
+                    "id": 3806,
+                    "order": 0,
+                    "time": "00:00:00",
+                    "time_calculated": "16:37:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 680,
+                        "name": "TENERIA",
+                        "latitude": -3.940617,
+                        "longitude": -79.253533,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3807,
+                    "order": 1,
+                    "time": "00:08:00",
+                    "time_calculated": "16:45:00",
+                    "time_reported": "16:45:42",
+                    "point": {
+                        "id": 684,
+                        "name": "Y DE CARIGÁN",
+                        "latitude": -3.96031,
+                        "longitude": -79.2403,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3808,
+                    "order": 2,
+                    "time": "00:06:00",
+                    "time_calculated": "16:51:00",
+                    "time_reported": "16:51:58",
+                    "point": {
+                        "id": 686,
+                        "name": "PUENTE FALLA GEOLOGICA",
+                        "latitude": -3.97000578,
+                        "longitude": -79.22574554,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3809,
+                    "order": 3,
+                    "time": "00:06:00",
+                    "time_calculated": "16:57:00",
+                    "time_reported": "16:56:51",
+                    "point": {
+                        "id": 687,
+                        "name": "CRUCE DE RUTAS",
+                        "latitude": -3.970077,
+                        "longitude": -79.209579,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3810,
+                    "order": 4,
+                    "time": "00:03:00",
+                    "time_calculated": "17:00:00",
+                    "time_reported": "16:59:55",
+                    "point": {
+                        "id": 682,
+                        "name": "SANDY",
+                        "latitude": -3.972441,
+                        "longitude": -79.206174,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3811,
+                    "order": 5,
+                    "time": "00:01:00",
+                    "time_calculated": "17:01:00",
+                    "time_reported": "17:01:22",
+                    "point": {
+                        "id": 709,
+                        "name": "TERMINAL TERRESTRE",
+                        "latitude": -3.978437,
+                        "longitude": -79.204387,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3812,
+                    "order": 6,
+                    "time": "00:01:00",
+                    "time_calculated": "17:02:00",
+                    "time_reported": "17:02:25",
+                    "point": {
+                        "id": 708,
+                        "name": "EL VALLE",
+                        "latitude": -3.9812,
+                        "longitude": -79.2044858,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3813,
+                    "order": 7,
+                    "time": "00:01:00",
+                    "time_calculated": "17:03:00",
+                    "time_reported": "17:03:57",
+                    "point": {
+                        "id": 707,
+                        "name": "LOJANA DE TURISMO",
+                        "latitude": -3.985,
+                        "longitude": -79.206032,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3814,
+                    "order": 8,
+                    "time": "00:02:00",
+                    "time_calculated": "17:05:00",
+                    "time_reported": "17:06:32",
+                    "point": {
+                        "id": 706,
+                        "name": "PUENTE BOLÍVAR",
+                        "latitude": -3.99016465,
+                        "longitude": -79.2053751,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3815,
+                    "order": 9,
+                    "time": "00:03:00",
+                    "time_calculated": "17:08:00",
+                    "time_reported": "17:08:58",
+                    "point": {
+                        "id": 705,
+                        "name": "PARQUE BOLIVAR",
+                        "latitude": -3.99528492,
+                        "longitude": -79.2053195,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3816,
+                    "order": 10,
+                    "time": "00:01:00",
+                    "time_calculated": "17:09:00",
+                    "time_reported": "17:09:53",
+                    "point": {
+                        "id": 3,
+                        "name": "PARQUE CENTRAL",
+                        "latitude": -3.997392906179897,
+                        "longitude": -79.20510957452761,
+                        "radius": 60
+                    }
+                },
+                {
+                    "id": 3817,
+                    "order": 11,
+                    "time": "00:03:00",
+                    "time_calculated": "17:12:00",
+                    "time_reported": "17:12:44",
+                    "point": {
+                        "id": 727,
+                        "name": "LA INDEPENDENCIA",
+                        "latitude": -4.000869793663867,
+                        "longitude": -79.20483120431005,
+                        "radius": 40
+                    }
+                },
+                {
+                    "id": 3818,
+                    "order": 12,
+                    "time": "00:03:00",
+                    "time_calculated": "17:15:00",
+                    "time_reported": "17:15:15",
+                    "point": {
+                        "id": 704,
+                        "name": "MERCADILLO Y JOSÉ M. PEÑA",
+                        "latitude": -4.00148133,
+                        "longitude": -79.206308,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3819,
+                    "order": 13,
+                    "time": "00:06:00",
+                    "time_calculated": "17:21:00",
+                    "time_reported": "17:18:31",
+                    "point": {
+                        "id": 681,
+                        "name": "ADOLFO VALAREZO",
+                        "latitude": -3.99281852,
+                        "longitude": -79.21002566,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3820,
+                    "order": 14,
+                    "time": "00:10:00",
+                    "time_calculated": "17:31:00",
+                    "time_reported": "17:30:11",
+                    "point": {
+                        "id": 690,
+                        "name": "ENTRADA A MENFIS Y AV. VILLONACO",
+                        "latitude": -3.99843,
+                        "longitude": -79.2205,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3821,
+                    "order": 15,
+                    "time": "00:10:00",
+                    "time_calculated": "17:41:00",
+                    "time_reported": "17:40:45",
+                    "point": {
+                        "id": 678,
+                        "name": "MENFIS",
+                        "latitude": -4.010067,
+                        "longitude": -79.229488,
+                        "radius": 50
+                    }
+                }
+            ]
+        },
+        {
+            "step": 8,
+            "code": "G807",
+            "register": 1624,
+            "date": "2026-04-17",
+            "start_schedule": "18:30:00",
+            "end_schedule": "19:36:00",
+            "line": {
+                "id": 60,
+                "name": "A1",
+                "number": 8,
+                "start_route": "CIUDAD VICTORIA",
+                "end_route": "CARIGAN"
+            },
+            "checkpoints": [
+                {
+                    "id": 3822,
+                    "order": 0,
+                    "time": "00:00:00",
+                    "time_calculated": "18:30:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 693,
+                        "name": "PUNTO CERO CIUDAD VICTORIA",
+                        "latitude": -4.00158308,
+                        "longitude": -79.23373975,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3823,
+                    "order": 1,
+                    "time": "00:01:00",
+                    "time_calculated": "18:31:00",
+                    "time_reported": "18:31:08",
+                    "point": {
+                        "id": 692,
+                        "name": "SALIDA CIUDAD VICTORIA",
+                        "latitude": -4.000206,
+                        "longitude": -79.232376,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3824,
+                    "order": 2,
+                    "time": "00:05:00",
+                    "time_calculated": "18:36:00",
+                    "time_reported": "18:36:00",
+                    "point": {
+                        "id": 691,
+                        "name": "ALFREDO P DIEZCANSECO Y AV. VILLONACO",
+                        "latitude": -3.99948275,
+                        "longitude": -79.22786861,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3825,
+                    "order": 3,
+                    "time": "00:03:00",
+                    "time_calculated": "18:39:00",
+                    "time_reported": "18:39:03",
+                    "point": {
+                        "id": 690,
+                        "name": "ENTRADA A MENFIS Y AV. VILLONACO",
+                        "latitude": -3.99843,
+                        "longitude": -79.2205,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3826,
+                    "order": 4,
+                    "time": "00:07:00",
+                    "time_calculated": "18:46:00",
+                    "time_reported": "18:45:47",
+                    "point": {
+                        "id": 689,
+                        "name": "BELLO HORIZONTE",
+                        "latitude": -3.98387902,
+                        "longitude": -79.213212,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3827,
+                    "order": 5,
+                    "time": "00:02:00",
+                    "time_calculated": "18:48:00",
+                    "time_reported": "18:48:01",
+                    "point": {
+                        "id": 688,
+                        "name": "EL BOSQUE",
+                        "latitude": -3.97926088,
+                        "longitude": -79.208,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3828,
+                    "order": 6,
+                    "time": "00:08:00",
+                    "time_calculated": "18:56:00",
+                    "time_reported": "18:56:05",
+                    "point": {
+                        "id": 699,
+                        "name": "REDONDEL BOMBA QUEMADA",
+                        "latitude": -4.001509,
+                        "longitude": -79.207761,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3829,
+                    "order": 7,
+                    "time": "00:02:00",
+                    "time_calculated": "18:58:00",
+                    "time_reported": "19:02:17",
+                    "point": {
+                        "id": 727,
+                        "name": "LA INDEPENDENCIA",
+                        "latitude": -4.000869793663867,
+                        "longitude": -79.20483120431005,
+                        "radius": 40
+                    }
+                },
+                {
+                    "id": 3830,
+                    "order": 8,
+                    "time": "00:03:00",
+                    "time_calculated": "19:01:00",
+                    "time_reported": "19:04:01",
+                    "point": {
+                        "id": 3,
+                        "name": "PARQUE CENTRAL",
+                        "latitude": -3.997392906179897,
+                        "longitude": -79.20510957452761,
+                        "radius": 60
+                    }
+                },
+                {
+                    "id": 3831,
+                    "order": 9,
+                    "time": "00:01:00",
+                    "time_calculated": "19:02:00",
+                    "time_reported": "19:05:25",
+                    "point": {
+                        "id": 705,
+                        "name": "PARQUE BOLIVAR",
+                        "latitude": -3.99528492,
+                        "longitude": -79.2053195,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3832,
+                    "order": 10,
+                    "time": "00:02:30",
+                    "time_calculated": "19:04:30",
+                    "time_reported": "19:08:45",
+                    "point": {
+                        "id": 698,
+                        "name": "PUENTE LEA",
+                        "latitude": -3.99095327,
+                        "longitude": -79.2050693,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3833,
+                    "order": 11,
+                    "time": "00:01:00",
+                    "time_calculated": "19:05:30",
+                    "time_reported": "19:10:05",
+                    "point": {
+                        "id": 697,
+                        "name": "PARADA MAYORISTA",
+                        "latitude": -3.987542,
+                        "longitude": -79.205304,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3834,
+                    "order": 12,
+                    "time": "00:02:30",
+                    "time_calculated": "19:08:00",
+                    "time_reported": "19:13:21",
+                    "point": {
+                        "id": 708,
+                        "name": "EL VALLE",
+                        "latitude": -3.9812,
+                        "longitude": -79.2044858,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3835,
+                    "order": 13,
+                    "time": "00:01:00",
+                    "time_calculated": "19:09:00",
+                    "time_reported": "19:14:45",
+                    "point": {
+                        "id": 709,
+                        "name": "TERMINAL TERRESTRE",
+                        "latitude": -3.978437,
+                        "longitude": -79.204387,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3836,
+                    "order": 14,
+                    "time": "00:05:00",
+                    "time_calculated": "19:14:00",
+                    "time_reported": "19:22:52",
+                    "point": {
+                        "id": 687,
+                        "name": "CRUCE DE RUTAS",
+                        "latitude": -3.970077,
+                        "longitude": -79.209579,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3837,
+                    "order": 15,
+                    "time": "00:07:00",
+                    "time_calculated": "19:21:00",
+                    "time_reported": "19:28:57",
+                    "point": {
+                        "id": 686,
+                        "name": "PUENTE FALLA GEOLOGICA",
+                        "latitude": -3.97000578,
+                        "longitude": -79.22574554,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3838,
+                    "order": 16,
+                    "time": "00:05:00",
+                    "time_calculated": "19:26:00",
+                    "time_reported": "19:33:36",
+                    "point": {
+                        "id": 685,
+                        "name": "REDONDEL VIA CUENCA",
+                        "latitude": -3.961068,
+                        "longitude": -79.238681,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3839,
+                    "order": 17,
+                    "time": "00:01:00",
+                    "time_calculated": "19:27:00",
+                    "time_reported": "19:34:35",
+                    "point": {
+                        "id": 684,
+                        "name": "Y DE CARIGÁN",
+                        "latitude": -3.96031,
+                        "longitude": -79.2403,
+                        "radius": 50
+                    }
+                },
+                {
+                    "id": 3840,
+                    "order": 18,
+                    "time": "00:09:00",
+                    "time_calculated": "19:36:00",
+                    "time_reported": "00:00:00",
+                    "point": {
+                        "id": 683,
+                        "name": "FIN CARIGÁN",
+                        "latitude": -3.95064,
+                        "longitude": -79.234841,
+                        "radius": 50
+                    }
+                }
+            ]
+        }
+    ],
+    "message": "Dispatch retrieved successfully",
+    "statusCode": 200
+}

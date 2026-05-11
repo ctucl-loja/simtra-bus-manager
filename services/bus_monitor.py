@@ -84,42 +84,59 @@ DISPATCHED:     bool           = False
 # LÓGICA DE DESPACHO
 # ─────────────────────────────────────────────
 
+from datetime import datetime, timedelta
+
 def get_current_step(steps: list[dict]) -> Optional[dict]:
     """
-    Evalúa la lista de despachos del día y devuelve:
-      1. El step activo si la hora actual está dentro de su rango.
-      2. El próximo step si estamos entre turnos o antes del primero.
-      3. None si todos los turnos del día ya terminaron,
-         o si la lista está vacía (bus sin despachos hoy).
+    Evalúa la lista de despachos con tolerancia de ±5 minutos.
     """
     if not steps:
         return None
 
     current_time = datetime.now().time()
+    TOLERANCE_MINUTES = 5
+    tolerance = timedelta(minutes=TOLERANCE_MINUTES)
+
     upcoming = []
 
     for step in steps:
-        start = datetime.strptime(step['start_schedule'], "%H:%M:%S").time()
-        end   = datetime.strptime(step['end_schedule'],   "%H:%M:%S").time()
+        start = datetime.strptime(step['start_schedule'], "%H:%M:%S")
+        end   = datetime.strptime(step['end_schedule'],   "%H:%M:%S")
 
-        if start <= current_time <= end:
-            return step  # turno activo → prioridad máxima
+        current_dt = datetime.strptime(str(current_time), "%H:%M:%S")
 
-        if start > current_time:
+        # Aplicar tolerancia: ±5 minutos
+        start_with_buffer = start - tolerance
+        end_with_buffer   = end + tolerance
+
+        if start_with_buffer <= current_dt <= end_with_buffer:
+            return step
+
+        if start_with_buffer > current_dt:
             upcoming.append(step)
 
     if upcoming:
         return min(upcoming, key=lambda s: s['start_schedule'])
 
-    return None  # todos los turnos del día ya terminaron
+    return None
 
 
 def is_step_active(step: dict) -> bool:
-    """Retorna True si la hora actual está dentro del rango horario del step."""
+    """
+    Retorna True si está dentro del rango ±5 minutos.
+    """
     current_time = datetime.now().time()
-    start = datetime.strptime(step['start_schedule'], "%H:%M:%S").time()
-    end   = datetime.strptime(step['end_schedule'],   "%H:%M:%S").time()
-    return start <= current_time <= end
+    TOLERANCE_MINUTES = 5
+    tolerance = timedelta(minutes=TOLERANCE_MINUTES)
+
+    start = datetime.strptime(step['start_schedule'], "%H:%M:%S")
+    end   = datetime.strptime(step['end_schedule'],   "%H:%M:%S")
+    current_dt = datetime.strptime(str(current_time), "%H:%M:%S")
+
+    start_with_buffer = start - tolerance
+    end_with_buffer   = end + tolerance
+
+    return start_with_buffer <= current_dt <= end_with_buffer
 
 
 def load_all_dispatches(date: Optional[str] = None) -> bool:
