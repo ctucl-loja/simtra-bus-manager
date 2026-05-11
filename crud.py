@@ -85,12 +85,12 @@ def get_pending_passengers(db:Session):
 def get_passengers_today(db: Session):
     """
     Retorna todos los pasajeros de hoy y el total.
-    Más eficiente: el count se obtiene de la BD.
+    (La RPi ya está configurada con hora Ecuador)
     """
-    today_ecuador = datetime.now(ECUADOR_TZ).date()
+    today = datetime.now().date()
     
-    start_of_day = datetime.combine(today_ecuador, time.min).replace(tzinfo=ECUADOR_TZ)
-    end_of_day = datetime.combine(today_ecuador, time.max).replace(tzinfo=ECUADOR_TZ)
+    start_of_day = datetime.combine(today, time.min)
+    end_of_day = datetime.combine(today, time.max)
     
     query = db.query(Passenger).filter(
         Passenger.timestamp >= start_of_day,
