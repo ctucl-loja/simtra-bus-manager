@@ -1,13 +1,14 @@
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from typing import Optional
-
+from zoneinfo import ZoneInfo
 import models
 from database import engine, SessionLocal
 from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate
 import crud
+from datetime import datetime
 
-
+ECUADOR_TZ = ZoneInfo("America/Guayaquil")
 models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="SIMTRA TRACKING API")
 
@@ -57,6 +58,16 @@ def get_pending_checkpoint(db: Session = Depends(get_db)):
 @app.post("/api/passenger", response_model=PassengerCreate, status_code=201)
 def save_passenger(data: PassengerCreate, db: Session = Depends(get_db)):
     return crud.create_passenger(db, data)
+
+@app.get("/api/passenger/today")
+def get_passengers_today(db: Session = Depends(get_db)):
+    """Obtener pasajeros de hoy con total"""
+    result = crud.get_passengers_today(db)
+    return {
+        "date": datetime.now(ECUADOR_TZ).date(),
+        **result
+    }
+
 
 @app.patch("/api/passenger/{id}")
 def update_status_passenger(id: int, db: Session = Depends(get_db)):

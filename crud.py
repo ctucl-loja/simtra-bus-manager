@@ -2,7 +2,7 @@ from sqlalchemy.orm import Session
 from models import Gps,CheckPoint,Passenger
 from schemas import GPSDataCreate,PassengerCreate
 from datetime import datetime, timezone
-from datetime import datetime
+from datetime import datetime,time
 
 from zoneinfo import ZoneInfo
 
@@ -81,6 +81,29 @@ def get_pending_passengers(db:Session):
         Passenger.upload == False
     ).all()
     return passengers
+
+def get_passengers_today(db: Session):
+    """
+    Retorna todos los pasajeros de hoy y el total.
+    Más eficiente: el count se obtiene de la BD.
+    """
+    today_ecuador = datetime.now(ECUADOR_TZ).date()
+    
+    start_of_day = datetime.combine(today_ecuador, time.min).replace(tzinfo=ECUADOR_TZ)
+    end_of_day = datetime.combine(today_ecuador, time.max).replace(tzinfo=ECUADOR_TZ)
+    
+    query = db.query(Passenger).filter(
+        Passenger.timestamp >= start_of_day,
+        Passenger.timestamp <= end_of_day
+    )
+    
+    passengers = query.all()
+    total = query.count()
+    
+    return {
+        "passengers": passengers,
+        "total": total
+    }
 
 
 
