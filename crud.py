@@ -1,7 +1,8 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
-from models import Gps,CheckPoint,Passenger,Dispatch
-from schemas import GPSDataCreate,PassengerCreate,DispatchCreate
+from typing import Optional
+from models import Gps,CheckPoint,Passenger,Dispatch,Event
+from schemas import GPSDataCreate,PassengerCreate,DispatchCreate,EventCreate
 from datetime import datetime, timezone
 from datetime import datetime,time
 
@@ -160,3 +161,37 @@ def update_dispatch_checkpoint(db: Session, step: int, checkpoint_id: int, time_
     db.commit()
     db.refresh(dispatch)
     return dispatch
+
+
+def create_event(db: Session, data: EventCreate) -> Event:
+    event = Event(
+        event_type=data.event_type,
+        priority=data.priority.value,
+        message=data.message,
+        payload=data.payload,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return event
+
+
+def get_events(
+    db: Session,
+    priority: Optional[str] = None,
+    event_type: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    limit: int = 100,
+):
+    """Eventos más recientes primero. Los filtros son opcionales (listos para usarse a futuro)."""
+    query = db.query(Event)
+    if priority:
+        query = query.filter(Event.priority == priority)
+    if event_type:
+        query = query.filter(Event.event_type == event_type)
+    if start_date:
+        query = query.filter(Event.created_at >= start_date)
+    if end_date:
+        query = query.filter(Event.created_at <= end_date)
+    return query.order_by(Event.created_at.desc()).limit(limit).all()

@@ -4,7 +4,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 import models
 from database import engine, SessionLocal
-from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate
+from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate, EventCreate, EventResponse
 import crud
 from datetime import datetime
 
@@ -91,3 +91,21 @@ def read_dispatch(db: Session = Depends(get_db)):
 @app.patch("/api/dispatch/checkpoint", response_model=Optional[DispatchResponse])
 def update_dispatch_checkpoint(data: DispatchCheckpointUpdate, db: Session = Depends(get_db)):
     return crud.update_dispatch_checkpoint(db, data.step, data.checkpoint_id, data.time_reported)
+
+
+#endpoints events
+
+@app.post("/api/events", response_model=EventResponse, status_code=201)
+def create_event(data: EventCreate, db: Session = Depends(get_db)):
+    return crud.create_event(db, data)
+
+@app.get("/api/events", response_model=list[EventResponse])
+def read_events(
+    priority: Optional[str] = None,
+    event_type: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    return crud.get_events(db, priority, event_type, start_date, end_date, limit)

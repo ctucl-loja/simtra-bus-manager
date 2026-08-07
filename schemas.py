@@ -1,5 +1,6 @@
 from pydantic import BaseModel,Field
 from datetime import datetime
+from enum import Enum
 
 class GPSDataCreate(BaseModel):
     latitude: float
@@ -58,4 +59,25 @@ class DispatchCheckpointUpdate(BaseModel):
     step: int
     checkpoint_id: int
     time_reported: str
+
+
+class EventPriority(str, Enum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
+class EventCreate(BaseModel):
+    event_type: str
+    priority: EventPriority
+    message: str
+    payload: dict | None = None
+
+
+class EventResponse(EventCreate):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 

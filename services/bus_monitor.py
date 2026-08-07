@@ -424,6 +424,30 @@ def report_dispatch_checkpoint(step: int, checkpoint_id: int, time_reported: str
         log.error(f"No se pudo actualizar el despacho para checkpoint_id={checkpoint_id}: {e}")
 
 
+# ─────────────────────────────────────────────
+# REGISTRO DE EVENTOS
+# ─────────────────────────────────────────────
+
+def log_event(event_type: str, priority: str, message: str, payload: Optional[dict] = None):
+    """
+    Registra un evento genérico en la API local (tabla `events`). Reutilizable
+    para cualquier tipo de evento futuro: basta con llamar a esta función con
+    un event_type/priority/payload distintos, sin tocar la capa de transporte.
+    """
+    try:
+        body = {
+            "event_type": event_type,
+            "priority": priority,
+            "message": message,
+            "payload": payload,
+        }
+        resp = requests.post(f"{LOCAL_BACKEND}/api/events", json=body, timeout=5)
+        resp.raise_for_status()
+        log.debug(f"Evento registrado OK: {event_type}")
+    except requests.RequestException as e:
+        log.error(f"No se pudo registrar el evento '{event_type}': {e}")
+
+
 def _find_unreported_checkpoint(step: Optional[dict], point_id: int) -> Optional[dict]:
     """Busca, dentro de un step, el checkpoint del punto point_id que aún no fue reportado."""
     if not step:
@@ -475,6 +499,19 @@ def resolve_and_report_checkpoint(monitor: "GeofenceMonitor", point_id: int, nam
     report_checkpoint(target_ckpt["id"], name, time_reported)
     report_dispatch_checkpoint(target_step["step"], target_ckpt["id"], time_reported)
     REPORTED_CHECKPOINTS.add(target_ckpt["id"])
+
+    log_event(
+        event_type="geofence_entry",
+        priority="HIGH",
+        message=f"Entrada a geocerca '{name}' — checkpoint {target_ckpt['id']} (step {target_step['step']})",
+        payload={
+            "geofence_id": point_id,
+            "geofence_name": name,
+            "step": target_step["step"],
+            "checkpoint_id": target_ckpt["id"],
+            "time_reported": time_reported,
+        },
+    )
 
     if advance:
         log.info(f"[TRIP] Avance de step por geocerca → {target_step.get('code', '?')} (step {target_step['step']})")

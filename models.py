@@ -32,6 +32,16 @@ class Dispatch(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class Event(Base):
+    __tablename__ = "events"
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    priority = Column(String, nullable=False, index=True)
+    event_type = Column(String, nullable=False, index=True)
+    message = Column(String, nullable=False)
+    payload = Column(JSON, nullable=True)   # datos especificos del event_type (geofence_id, checkpoint_id, step, etc.)
+
+
 class Passenger(Base):
     __tablename__ = "passenger"
     id = Column(Integer, primary_key=True, index=True)
