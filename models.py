@@ -42,6 +42,20 @@ class Event(Base):
     payload = Column(JSON, nullable=True)   # datos especificos del event_type (geofence_id, checkpoint_id, step, etc.)
 
 
+class Vehicle(Base):
+    __tablename__ = "vehicle"
+    id = Column(Integer, primary_key=True, index=True)
+    register = Column(Integer, nullable=False, index=True)
+    plate = Column(String, nullable=True, index=True)
+    data = Column(JSON, nullable=True)   # informacion completa del vehiculo tal como la entrega el backend
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class Passenger(Base):
     __tablename__ = "passenger"
     id = Column(Integer, primary_key=True, index=True)

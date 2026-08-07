@@ -1,4 +1,5 @@
 from api import ApiService
+import audio_announcer
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional
@@ -142,6 +143,33 @@ def is_step_active(step: dict) -> bool:
     return start_with_buffer <= current_dt <= end_with_buffer
 
 
+def is_in_transition_period(current_step: dict, next_step: Optional[dict]) -> bool:
+    """
+    True si el horario del step actual ya terminó y el siguiente todavía no
+    empieza. Es la ventana en la que el bus, adelantado, puede volver a
+    atravesar físicamente geocercas del recorrido que acaba de terminar
+    camino al siguiente.
+
+    Sin step siguiente no hay ambigüedad posible (ninguna geocerca puede
+    pertenecer a un recorrido posterior), así que no se considera transición y
+    el cierre del último checkpoint del día sigue funcionando como siempre.
+    """
+    if next_step is None:
+        return False
+
+    # Se formatea sin microsegundos antes de re-parsear (mismo motivo que en
+    # get_current_step: strptime con "%H:%M:%S" no tolera ".111463").
+    now = datetime.strptime(datetime.now().strftime("%H:%M:%S"), "%H:%M:%S")
+    end_current = datetime.strptime(current_step["end_schedule"], "%H:%M:%S")
+
+    # is_step_active ya aplica la tolerancia de ±5 min; el segundo chequeo
+    # distingue "ya terminó" de "todavía no empieza" (ambos dan inactivo).
+    if is_step_active(current_step) or now <= end_current:
+        return False
+
+    return not is_step_active(next_step)
+
+
 def load_all_dispatches(date: Optional[str] = None) -> bool:
     """
     Carga todos los despachos del día desde la API de Simtra.
@@ -163,10 +191,39 @@ def load_all_dispatches(date: Optional[str] = None) -> bool:
         log.info(f"Despachos cargados: {len(ALL_DISPATCHES)} turno(s)")
         seed_reported_checkpoints(ALL_DISPATCHES)
         cache_dispatch_locally(ALL_DISPATCHES, query_date)
+        sync_vehicle_info()
         return True
     except Exception as e:
         log.error(f"Error consultando despachos: {e}")
         return False
+
+
+def sync_vehicle_info():
+    """
+    Descarga la información del vehículo asociado al bus (vía services/api.py,
+    nunca con requests directo al backend remoto) y la cachea en el backend
+    local, igual que se hace con el despacho.
+    """
+    vehicle = simtra.get_vehicle(BUS_REGISTER)
+    if not vehicle:
+        log.warning("La API no devolvió información del vehículo")
+        return
+    cache_vehicle_locally(vehicle)
+
+
+def cache_vehicle_locally(vehicle: dict):
+    """Guarda la información del vehículo en el backend local (upsert por register)."""
+    try:
+        payload = {
+            "register": BUS_REGISTER,
+            "plate": vehicle.get("plate"),
+            "data": vehicle,
+        }
+        resp = requests.post(f"{LOCAL_BACKEND}/api/vehicle", json=payload, timeout=5)
+        resp.raise_for_status()
+        log.debug("Información del vehículo cacheada en el backend local")
+    except requests.RequestException as e:
+        log.error(f"No se pudo cachear la información del vehículo: {e}")
 
 
 def seed_reported_checkpoints(dispatches: list[dict]):
@@ -208,6 +265,48 @@ def merge_geofences(*steps: Optional[dict]) -> list[dict]:
             point = ckpt["point"]
             merged.setdefault(point["id"], point)
     return list(merged.values())
+
+
+def get_upcoming_checkpoints(step: dict, after_order: int, count: int) -> list[dict]:
+    """
+    Devuelve hasta `count` checkpoints posteriores a after_order dentro de step,
+    continuando en los steps siguientes de ALL_DISPATCHES si hace falta (cruza
+    de step igual que la ventana de geocercas).
+    """
+    result: list[dict] = []
+    idx = step_index(step)
+    if idx is None:
+        return result
+
+    remaining = sorted(
+        (c for c in step["checkpoints"] if c["order"] > after_order),
+        key=lambda c: c["order"],
+    )
+    result.extend(remaining)
+
+    next_idx = idx + 1
+    while len(result) < count and next_idx < len(ALL_DISPATCHES):
+        result.extend(sorted(ALL_DISPATCHES[next_idx]["checkpoints"], key=lambda c: c["order"]))
+        next_idx += 1
+
+    return result[:count]
+
+
+def prefetch_upcoming_audio(step: dict, after_order: int, count: int = 2):
+    """
+    Prepara con anticipación el audio de los siguientes `count` checkpoints
+    después de after_order (cruzando de step si hace falta), para que estén
+    listos antes de que el bus llegue físicamente. No bloquea.
+    """
+    upcoming = get_upcoming_checkpoints(step, after_order, count + 1)
+    for i in range(min(count, len(upcoming))):
+        ckpt = upcoming[i]
+        nxt = upcoming[i + 1] if i + 1 < len(upcoming) else None
+        audio_announcer.prepare(
+            ckpt["id"],
+            ckpt["point"]["name"],
+            nxt["point"]["name"] if nxt else None,
+        )
 
 
 def cache_dispatch_locally(dispatches: list[dict], date: str):
@@ -273,6 +372,12 @@ def apply_step(step: Optional[dict], monitor_ref: list):
             f"Turno aplicado: {step.get('code', '?')}  "
             f"{step['start_schedule']} → {step['end_schedule']}  [{status}]"
         )
+
+    # Fuera del lock: primer(os) checkpoint(s) del step recién aplicado, para
+    # que su audio ya esté listo antes de que el bus llegue (nunca hubo un
+    # playback previo que dispare la cadena de prefetch para estos).
+    if is_new_step:
+        prefetch_upcoming_audio(current_step, -1, 2)
 
 
 # ─────────────────────────────────────────────
@@ -458,6 +563,26 @@ def _find_unreported_checkpoint(step: Optional[dict], point_id: int) -> Optional
     return None
 
 
+MAX_SKIPPED_CHECKPOINTS = 2   # omisiones toleradas antes de considerar la secuencia inconsistente
+
+
+def has_consistent_sequence(step: dict, target_ckpt: dict) -> bool:
+    """
+    Evalúa si el recorrido ya hecho respalda marcar target_ckpt: cuenta los
+    checkpoints anteriores (order menor) del mismo step que siguen sin reportar.
+
+    Hasta MAX_SKIPPED_CHECKPOINTS omisiones se consideran inconsistencias
+    normales del GPS y no impiden marcar; más que eso indica que el bus no
+    venía realmente recorriendo este step y que la entrada a la geocerca es
+    un cruce de paso, no una llegada legítima.
+    """
+    skipped = [
+        c for c in step["checkpoints"]
+        if c["order"] < target_ckpt["order"] and c["id"] not in REPORTED_CHECKPOINTS
+    ]
+    return len(skipped) <= MAX_SKIPPED_CHECKPOINTS
+
+
 def resolve_and_report_checkpoint(monitor: "GeofenceMonitor", point_id: int, name: str, time_reported: str):
     """
     Decide a qué checkpoint corresponde una entrada de geocerca (usando el
@@ -471,7 +596,11 @@ def resolve_and_report_checkpoint(monitor: "GeofenceMonitor", point_id: int, nam
          pendiente del step actual queda sin marcar a propósito) como una
          llegada tardía a la primera geocerca del siguiente step.
       3) Checkpoint del step actual (incluida su última geocerca cuando NO es
-         compartida con el siguiente) → cierre normal, sin avanzar.
+         compartida con el siguiente) → cierre normal, sin avanzar. Si además
+         estamos en el período de transición (este step ya terminó por horario
+         y el siguiente aún no empieza), el último checkpoint solo se marca si
+         la secuencia recorrida lo respalda: en esa ventana el bus adelantado
+         puede estar re-atravesando la geocerca camino al próximo recorrido.
       4) Sin candidato sin reportar (incluye coincidir solo con el step
          anterior, ya superado) → se ignora, no se recupera.
     """
@@ -491,6 +620,19 @@ def resolve_and_report_checkpoint(monitor: "GeofenceMonitor", point_id: int, nam
         if next_ckpt is not None:
             target_step, target_ckpt, advance = next_step, next_ckpt, True
         elif current_ckpt is not None:
+            # Último checkpoint del step actual. Durante el período de transición
+            # la entrada puede ser un cruce de paso hacia el siguiente recorrido:
+            # se exige que la secuencia ya recorrida lo respalde.
+            if (
+                is_in_transition_period(current_step, next_step)
+                and not has_consistent_sequence(current_step, current_ckpt)
+            ):
+                log.info(
+                    f"[TRIP] Geocerca '{name}' ignorada — último checkpoint "
+                    f"{current_ckpt['id']} del step {current_step['step']} en transición "
+                    f"con secuencia inconsistente (más de {MAX_SKIPPED_CHECKPOINTS} checkpoints previos sin reportar)"
+                )
+                return
             target_step, target_ckpt = current_step, current_ckpt
         else:
             log.debug(f"Geocerca punto={point_id} sin checkpoint pendiente en el contexto actual — se ignora")
@@ -516,6 +658,18 @@ def resolve_and_report_checkpoint(monitor: "GeofenceMonitor", point_id: int, nam
     if advance:
         log.info(f"[TRIP] Avance de step por geocerca → {target_step.get('code', '?')} (step {target_step['step']})")
         apply_step(target_step, [monitor])
+
+    # Anuncio de voz: prioridad más baja, nunca bloquea el hilo de GPS (solo
+    # encola). Reproduce lo que ya estaba prefetch-eado; al terminar, prepara
+    # los próximos 2 checkpoints del recorrido.
+    next_ckpts = get_upcoming_checkpoints(target_step, target_ckpt["order"], 1)
+    next_name = next_ckpts[0]["point"]["name"] if next_ckpts else None
+    audio_announcer.announce(
+        target_ckpt["id"],
+        target_ckpt["point"]["name"],
+        next_name,
+        on_done=lambda _cid: prefetch_upcoming_audio(target_step, target_ckpt["order"], 2),
+    )
 
 
 # ─────────────────────────────────────────────

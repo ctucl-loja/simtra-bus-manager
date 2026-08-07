@@ -1,8 +1,8 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from typing import Optional
-from models import Gps,CheckPoint,Passenger,Dispatch,Event
-from schemas import GPSDataCreate,PassengerCreate,DispatchCreate,EventCreate
+from models import Gps,CheckPoint,Passenger,Dispatch,Event,Vehicle
+from schemas import GPSDataCreate,PassengerCreate,DispatchCreate,EventCreate,VehicleCreate
 from datetime import datetime, timezone
 from datetime import datetime,time
 
@@ -195,3 +195,25 @@ def get_events(
     if end_date:
         query = query.filter(Event.created_at <= end_date)
     return query.order_by(Event.created_at.desc()).limit(limit).all()
+
+
+def save_vehicle(db: Session, data: VehicleCreate) -> Vehicle:
+    """Registra o actualiza (upsert por register) la informacion del vehiculo."""
+    existing = db.query(Vehicle).filter(Vehicle.register == data.register).first()
+
+    if existing:
+        existing.plate = data.plate
+        existing.data = data.data
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    vehicle = Vehicle(register=data.register, plate=data.plate, data=data.data)
+    db.add(vehicle)
+    db.commit()
+    db.refresh(vehicle)
+    return vehicle
+
+
+def get_last_vehicle(db: Session):
+    return db.query(Vehicle).order_by(Vehicle.updated_at.desc()).first()

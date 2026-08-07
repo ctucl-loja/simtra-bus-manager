@@ -17,6 +17,7 @@ lerna-debug.log*
 .vscode
 __pycache__
 *.db
+/audio
 # Tests
 /coverage
 /.nyc_output

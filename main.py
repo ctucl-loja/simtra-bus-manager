@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 import models
 from database import engine, SessionLocal
-from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate, EventCreate, EventResponse
+from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate, EventCreate, EventResponse, VehicleCreate, VehicleResponse
 import crud
 from datetime import datetime
 
@@ -112,6 +112,17 @@ def read_events(
     db: Session = Depends(get_db),
 ):
     return crud.get_events(db, priority, event_type, start_date, end_date, limit)
+
+
+#endpoints vehicle
+
+@app.post("/api/vehicle", response_model=VehicleResponse)
+def save_vehicle(data: VehicleCreate, db: Session = Depends(get_db)):
+    return crud.save_vehicle(db, data)
+
+@app.get("/api/vehicle", response_model=Optional[VehicleResponse])
+def read_vehicle(db: Session = Depends(get_db)):
+    return crud.get_last_vehicle(db)
 
 
 #herramienta de prueba: inyector manual de GPS

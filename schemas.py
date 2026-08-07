@@ -81,3 +81,18 @@ class EventResponse(EventCreate):
     class Config:
         from_attributes = True
 
+
+class VehicleCreate(BaseModel):
+    register: int
+    plate: str | None = None
+    data: dict | None = None
+
+
+class VehicleResponse(VehicleCreate):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+

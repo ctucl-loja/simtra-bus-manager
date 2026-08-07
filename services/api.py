@@ -48,6 +48,26 @@ class ApiService():
             print(f"Error al obtener usuarios: {e}")
         return []
     
+    def get_vehicle(self,register):
+        url = f"{self.api_url}/api/vehicle/register/{register}"
+        headers = {
+            'Authorization': f'Bearer {self.jwt}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        try:
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                return response.json().get('result')
+            elif response.status_code == 401:
+                print("Token de autenticación no válido o expirado.")
+                self.jwt = self.get_jwt()
+            else:
+                print(f"Error en la solicitud: {response.status_code}")
+        except Exception as e:
+            print(f"Error al obtener vehiculo: {e}")
+        return None
+
     def post_passenger(self,data):
         url = f"{self.api_url}/api/passenger"
         headers = {

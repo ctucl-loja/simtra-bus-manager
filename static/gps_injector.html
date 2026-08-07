@@ -40,6 +40,23 @@
         width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
         font-size: 12px; font-weight: 700; border: 2px solid white; box-shadow: 0 0 3px rgba(0,0,0,.5);
     }
+    #map-context-menu {
+        display: none;
+        position: fixed;
+        z-index: 2000;
+        background: #1f2430;
+        border: 1px solid #3d4457;
+        border-radius: 6px;
+        box-shadow: 0 4px 14px rgba(0,0,0,.5);
+        padding: 4px;
+        min-width: 170px;
+    }
+    #map-context-menu button {
+        width: 100%; margin: 0; text-align: left;
+        background: transparent; border: none; border-radius: 4px;
+        color: #e6e6e6; padding: 8px 10px; font-size: 13px;
+    }
+    #map-context-menu button:hover { background: #2d3444; }
 </style>
 </head>
 <body>
@@ -78,13 +95,18 @@
 
         <hr>
         <div class="hint">
-            Haz clic en cualquier punto del mapa para insertar una posición GPS
-            con la hora actual. <code>bus_monitor.py</code> la procesa como si
-            viniera del GPS real (mismo endpoint <code>POST /api/gps</code> que
-            usa <code>navigation_simulation.py</code>).
+            Clic derecho en el mapa para elegir "Fijar nuevo punto" e insertar
+            una posición GPS con la hora actual en ese lugar.
+            <code>bus_monitor.py</code> la procesa como si viniera del GPS real
+            (mismo endpoint <code>POST /api/gps</code> que usa
+            <code>navigation_simulation.py</code>).
         </div>
     </div>
     <div id="map"></div>
+</div>
+
+<div id="map-context-menu">
+    <button type="button" id="ctx-fijar-punto">📍 Fijar nuevo punto</button>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -244,7 +266,36 @@ async function insertGpsPoint(lat, lon) {
     document.getElementById('f-last-status').innerHTML = '<span class="badge ok">Insertado en /api/gps</span>';
 }
 
-map.on('click', (e) => insertGpsPoint(e.latlng.lat, e.latlng.lng));
+// ── Menú contextual (clic derecho) para fijar un nuevo punto GPS ───────────
+const contextMenu = document.getElementById('map-context-menu');
+let pendingLatLng = null;
+
+function hideContextMenu() {
+    contextMenu.style.display = 'none';
+    pendingLatLng = null;
+}
+
+map.on('contextmenu', (e) => {
+    L.DomEvent.preventDefault(e.originalEvent); // evita el menú nativo del navegador
+    pendingLatLng = e.latlng;
+    contextMenu.style.left = `${e.originalEvent.clientX}px`;
+    contextMenu.style.top = `${e.originalEvent.clientY}px`;
+    contextMenu.style.display = 'block';
+});
+
+document.getElementById('ctx-fijar-punto').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (pendingLatLng) {
+        insertGpsPoint(pendingLatLng.lat, pendingLatLng.lng);
+    }
+    hideContextMenu();
+});
+
+// Clic izquierdo en cualquier otro lugar cierra el menú sin insertar nada.
+map.on('click', hideContextMenu);
+map.on('movestart zoomstart', hideContextMenu);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideContextMenu(); });
+
 document.getElementById('btn-refresh').addEventListener('click', loadDispatch);
 
 loadDispatch();
