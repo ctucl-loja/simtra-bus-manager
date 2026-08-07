@@ -74,10 +74,12 @@ simtra = ApiService(BACKEND_URL, BACKEND_USERNAME, BACKEND_PASSWORD)
 
 _lock = threading.Lock()
 
-ALL_DISPATCHES: list[dict]     = []   # todos los despachos del día
-CURRENT_STEP:   Optional[dict] = None
-GEOFENCES:      list[dict]     = []
-DISPATCHED:     bool           = False
+ALL_DISPATCHES: list[dict]      = []   # todos los despachos del día
+CURRENT_INDEX:  Optional[int]   = None   # posición del step activo dentro de ALL_DISPATCHES
+CURRENT_STEP:   Optional[dict]  = None   # alias de ALL_DISPATCHES[CURRENT_INDEX]
+GEOFENCES:      list[dict]      = []
+DISPATCHED:     bool            = False
+REPORTED_CHECKPOINTS: set[int]  = set()  # ids de checkpoint ya reportados hoy (evita doble reporte)
 
 
 # ─────────────────────────────────────────────
@@ -159,55 +161,118 @@ def load_all_dispatches(date: Optional[str] = None) -> bool:
             return False
         ALL_DISPATCHES = dispatches
         log.info(f"Despachos cargados: {len(ALL_DISPATCHES)} turno(s)")
+        seed_reported_checkpoints(ALL_DISPATCHES)
+        cache_dispatch_locally(ALL_DISPATCHES, query_date)
         return True
     except Exception as e:
         log.error(f"Error consultando despachos: {e}")
         return False
 
 
+def seed_reported_checkpoints(dispatches: list[dict]):
+    """
+    Marca como ya reportados (en memoria) los checkpoints que el backend remoto
+    ya trae con time_reported distinto de '00:00:00'. Evita reportarlos de nuevo
+    si el proceso se reinicia a mitad del día.
+    """
+    for step in dispatches:
+        for ckpt in step["checkpoints"]:
+            if ckpt.get("time_reported", "00:00:00") != "00:00:00":
+                REPORTED_CHECKPOINTS.add(ckpt["id"])
+
+
+def step_index(step: dict) -> Optional[int]:
+    """Ubica la posición de un step dentro de ALL_DISPATCHES según su número de step."""
+    for i, s in enumerate(ALL_DISPATCHES):
+        if s.get("step") == step.get("step"):
+            return i
+    return None
+
+
+def get_step_context(index: Optional[int]) -> tuple[Optional[dict], Optional[dict], Optional[dict]]:
+    """Devuelve (step_anterior, step_actual, step_siguiente) según el índice en ALL_DISPATCHES."""
+    if index is None or not (0 <= index < len(ALL_DISPATCHES)):
+        return None, None, None
+    prev_step = ALL_DISPATCHES[index - 1] if index > 0 else None
+    next_step = ALL_DISPATCHES[index + 1] if index + 1 < len(ALL_DISPATCHES) else None
+    return prev_step, ALL_DISPATCHES[index], next_step
+
+
+def merge_geofences(*steps: Optional[dict]) -> list[dict]:
+    """Une, sin duplicar por id de punto, las geocercas de los steps recibidos."""
+    merged: dict[int, dict] = {}
+    for step in steps:
+        if not step:
+            continue
+        for ckpt in step["checkpoints"]:
+            point = ckpt["point"]
+            merged.setdefault(point["id"], point)
+    return list(merged.values())
+
+
+def cache_dispatch_locally(dispatches: list[dict], date: str):
+    """
+    Guarda los despachos del día en el backend local (API - CLIENT) para que
+    otros servicios los consulten sin repetir la llamada al backend remoto.
+    """
+    try:
+        payload = {
+            "date": date,
+            "register": BUS_REGISTER,
+            "data": dispatches,
+        }
+        resp = requests.post(f"{LOCAL_BACKEND}/api/dispatch", json=payload, timeout=5)
+        resp.raise_for_status()
+        log.debug("Despachos cacheados en el backend local")
+    except requests.RequestException as e:
+        log.error(f"No se pudo cachear los despachos localmente: {e}")
+
+
 def apply_step(step: Optional[dict], monitor_ref: list):
     """
-    Actualiza el estado global con el step recibido.
-    Reinicializa el monitor si las geocercas cambiaron.
+    Sincroniza el estado global con el step recibido y amplía la ventana de
+    geocercas monitoreadas (anterior + actual + siguiente) de forma aditiva,
+    sin perder el estado de geocercas ya en seguimiento.
+    Nunca retrocede un CURRENT_INDEX que un avance por GPS ya superó (Regla 5:
+    el horario nunca deshace un avance real).
     monitor_ref es [monitor] para poder mutar la referencia desde el watcher.
     """
-    global CURRENT_STEP, GEOFENCES, DISPATCHED
+    global CURRENT_INDEX, CURRENT_STEP, GEOFENCES, DISPATCHED
 
     with _lock:
-        CURRENT_STEP = step
-
         if step is None:
-            GEOFENCES  = []
-            DISPATCHED = False
+            CURRENT_INDEX = None
+            CURRENT_STEP  = None
+            GEOFENCES     = []
+            DISPATCHED    = False
             log.info("Estado → SIN TURNO ACTIVO")
             return
 
-        new_geofences = [ckpt['point'] for ckpt in step['checkpoints']]
-        active        = is_step_active(step)
+        target_index = step_index(step)
+        if target_index is None:
+            log.warning("No se pudo ubicar el step recibido dentro de ALL_DISPATCHES")
+            return
 
-        # Reinicializa el monitor solo si las geocercas cambiaron
-        if new_geofences != GEOFENCES:
-            GEOFENCES      = new_geofences
-            monitor_ref[0] = GeofenceMonitor(GEOFENCES)
-            log.info(f"Monitor reiniciado — {len(GEOFENCES)} geocercas cargadas")
+        if CURRENT_INDEX is not None and target_index < CURRENT_INDEX:
+            log.debug("Se ignora: el horario sugiere retroceder a un step ya superado")
+            return
 
-        DISPATCHED = active
+        is_new_step   = target_index != CURRENT_INDEX
+        CURRENT_INDEX = target_index
+        CURRENT_STEP  = step
 
-        status = "ACTIVO" if active else f"EN ESPERA — inicia a las {step['start_schedule']}"
+        prev_step, current_step, next_step = get_step_context(CURRENT_INDEX)
+        monitor_ref[0].add_geofences(merge_geofences(prev_step, current_step, next_step))
+        GEOFENCES = monitor_ref[0].geofences
+
+        active     = is_step_active(step)
+        DISPATCHED = active if is_new_step else (DISPATCHED or active)
+
+        status = "ACTIVO" if DISPATCHED else f"EN ESPERA — inicia a las {step['start_schedule']}"
         log.info(
             f"Turno aplicado: {step.get('code', '?')}  "
             f"{step['start_schedule']} → {step['end_schedule']}  [{status}]"
         )
-
-
-def get_checkpoint_id(point_id: int) -> Optional[int]:
-    """Busca el id del checkpoint asociado al point_id dentro del turno activo."""
-    if not CURRENT_STEP:
-        return None
-    for ckpt in CURRENT_STEP["checkpoints"]:
-        if ckpt["point"]["id"] == point_id:
-            return ckpt["id"]
-    return None
 
 
 # ─────────────────────────────────────────────
@@ -221,7 +286,7 @@ def schedule_watcher(monitor_ref: list, stop_event: threading.Event):
       - Si un turno en espera ya comenzó → activa DISPATCHED.
       - Si es un nuevo día → recarga todos los despachos desde la API.
     """
-    global DISPATCHED
+    global DISPATCHED, CURRENT_INDEX
     last_date = datetime.now().strftime('%Y-%m-%d')
 
     while not stop_event.is_set():
@@ -232,8 +297,12 @@ def schedule_watcher(monitor_ref: list, stop_event: threading.Event):
         # ── Nuevo día: recarga completa ──────────────────────────────────────
         if current_date != last_date:
             log.info(f"[WATCHER] Nuevo día detectado ({current_date}) — recargando despachos")
-            last_date      = current_date
-            has_dispatches = load_all_dispatches()
+            last_date = current_date
+            with _lock:
+                CURRENT_INDEX = None
+                REPORTED_CHECKPOINTS.clear()
+            monitor_ref[0]  = GeofenceMonitor([])
+            has_dispatches  = load_all_dispatches()
             if not has_dispatches:
                 log.warning("[WATCHER] Bus sin despachos hoy")
                 apply_step(None, monitor_ref)
@@ -340,6 +409,78 @@ def report_checkpoint(checkpoint_id: int, name: str, time_reported: str):
         log.error(f"No se pudo guardar checkpoint '{name}': {e}")
 
 
+def report_dispatch_checkpoint(step: int, checkpoint_id: int, time_reported: str):
+    """Actualiza time_reported del checkpoint dentro del despacho activo cacheado localmente."""
+    try:
+        payload = {
+            "step": step,
+            "checkpoint_id": checkpoint_id,
+            "time_reported": time_reported,
+        }
+        resp = requests.patch(f"{LOCAL_BACKEND}/api/dispatch/checkpoint", json=payload, timeout=5)
+        resp.raise_for_status()
+        log.debug(f"Despacho actualizado OK: step={step} checkpoint_id={checkpoint_id}")
+    except requests.RequestException as e:
+        log.error(f"No se pudo actualizar el despacho para checkpoint_id={checkpoint_id}: {e}")
+
+
+def _find_unreported_checkpoint(step: Optional[dict], point_id: int) -> Optional[dict]:
+    """Busca, dentro de un step, el checkpoint del punto point_id que aún no fue reportado."""
+    if not step:
+        return None
+    for ckpt in step["checkpoints"]:
+        if ckpt["point"]["id"] == point_id and ckpt["id"] not in REPORTED_CHECKPOINTS:
+            return ckpt
+    return None
+
+
+def resolve_and_report_checkpoint(monitor: "GeofenceMonitor", point_id: int, name: str, time_reported: str):
+    """
+    Decide a qué checkpoint corresponde una entrada de geocerca (usando el
+    contexto step anterior/actual/siguiente) y la reporta. Prioridad:
+
+      1) Checkpoint intermedio (no el último) del step actual, sin reportar
+         → progreso normal dentro del step.
+      2) Checkpoint sin reportar del step siguiente → avanza de step. Cubre
+         tanto la geocerca compartida entre el último checkpoint pendiente
+         del step actual y el primero del siguiente (gana el avance, el
+         pendiente del step actual queda sin marcar a propósito) como una
+         llegada tardía a la primera geocerca del siguiente step.
+      3) Checkpoint del step actual (incluida su última geocerca cuando NO es
+         compartida con el siguiente) → cierre normal, sin avanzar.
+      4) Sin candidato sin reportar (incluye coincidir solo con el step
+         anterior, ya superado) → se ignora, no se recupera.
+    """
+    prev_step, current_step, next_step = get_step_context(CURRENT_INDEX)
+
+    current_ckpt = _find_unreported_checkpoint(current_step, point_id)
+    is_last_of_current = (
+        current_ckpt is not None
+        and current_ckpt["order"] == max(c["order"] for c in current_step["checkpoints"])
+    )
+
+    advance = False
+    if current_ckpt is not None and not is_last_of_current:
+        target_step, target_ckpt = current_step, current_ckpt
+    else:
+        next_ckpt = _find_unreported_checkpoint(next_step, point_id)
+        if next_ckpt is not None:
+            target_step, target_ckpt, advance = next_step, next_ckpt, True
+        elif current_ckpt is not None:
+            target_step, target_ckpt = current_step, current_ckpt
+        else:
+            log.debug(f"Geocerca punto={point_id} sin checkpoint pendiente en el contexto actual — se ignora")
+            return
+
+    report_checkpoint(target_ckpt["id"], name, time_reported)
+    report_dispatch_checkpoint(target_step["step"], target_ckpt["id"], time_reported)
+    REPORTED_CHECKPOINTS.add(target_ckpt["id"])
+
+    if advance:
+        log.info(f"[TRIP] Avance de step por geocerca → {target_step.get('code', '?')} (step {target_step['step']})")
+        apply_step(target_step, [monitor])
+
+
 # ─────────────────────────────────────────────
 # GEOMETRÍA
 # ─────────────────────────────────────────────
@@ -381,11 +522,19 @@ class GeofenceEvent:
 
 class GeofenceMonitor:
     def __init__(self, geofences: list[dict]):
-        self.geofences = geofences
+        self.geofences = list(geofences)
         self._active: dict[int, Optional[GeofenceEvent]] = {
             g["id"]: None for g in geofences
         }
         self.history: list[GeofenceEvent] = []
+
+    def add_geofences(self, geofences: list[dict]):
+        """Agrega geocercas nuevas sin tocar el estado (_active/history) de las existentes."""
+        for geo in geofences:
+            gid = geo["id"]
+            if gid not in self._active:
+                self._active[gid] = None
+                self.geofences.append(geo)
 
     def process(self, reading: GpsReading):
         now = datetime.now()
@@ -399,12 +548,9 @@ class GeofenceMonitor:
                 self._active[gid] = event
                 self.history.append(event)
 
-                checkpoint_id = get_checkpoint_id(gid)
-                if checkpoint_id:
-                    log.info(f" ENTRADA  [{gid}] {geo['name']}  @ {now.strftime('%H:%M:%S')}")
-                    report_checkpoint(checkpoint_id, geo["name"], now.strftime('%H:%M:%S'))
-                else:
-                    log.warning(f"ENTRADA [{gid}] {geo['name']} — checkpoint_id no encontrado")
+                time_reported = now.strftime('%H:%M:%S')
+                log.info(f" ENTRADA  [{gid}] {geo['name']}  @ {time_reported}")
+                resolve_and_report_checkpoint(self, gid, geo["name"], time_reported)
 
             elif not inside and active is not None:
                 self._active[gid] = None
@@ -470,13 +616,16 @@ def main():
     log.debug("Watcher thread iniciado")
 
     # 5. Loop principal de tracking
+    # Se monitorea el GPS mientras exista un step vigente (activo o en espera),
+    # sin importar el horario — una llegada anticipada o tardía nunca debe
+    # ignorarse solo por estar fuera de la ventana de schedule (Regla 5).
     try:
         while True:
             with _lock:
-                dispatched = DISPATCHED
-                monitor    = monitor_ref[0]
+                current_step = CURRENT_STEP
+                monitor      = monitor_ref[0]
 
-            if not dispatched:
+            if current_step is None:
                 time.sleep(0.5)
                 continue
 
