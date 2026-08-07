@@ -93,7 +93,10 @@ def get_current_step(steps: list[dict]) -> Optional[dict]:
     if not steps:
         return None
 
-    current_time = datetime.now().time()
+    # Se formatea explícitamente sin microsegundos antes de re-parsear;
+    # str(datetime.now().time()) a veces incluye microsegundos (".111463")
+    # y eso rompe strptime con el formato "%H:%M:%S".
+    current_dt = datetime.strptime(datetime.now().strftime("%H:%M:%S"), "%H:%M:%S")
     TOLERANCE_MINUTES = 5
     tolerance = timedelta(minutes=TOLERANCE_MINUTES)
 
@@ -102,8 +105,6 @@ def get_current_step(steps: list[dict]) -> Optional[dict]:
     for step in steps:
         start = datetime.strptime(step['start_schedule'], "%H:%M:%S")
         end   = datetime.strptime(step['end_schedule'],   "%H:%M:%S")
-
-        current_dt = datetime.strptime(str(current_time), "%H:%M:%S")
 
         # Aplicar tolerancia: ±5 minutos
         start_with_buffer = start - tolerance
@@ -125,13 +126,13 @@ def is_step_active(step: dict) -> bool:
     """
     Retorna True si está dentro del rango ±5 minutos.
     """
-    current_time = datetime.now().time()
     TOLERANCE_MINUTES = 5
     tolerance = timedelta(minutes=TOLERANCE_MINUTES)
 
     start = datetime.strptime(step['start_schedule'], "%H:%M:%S")
     end   = datetime.strptime(step['end_schedule'],   "%H:%M:%S")
-    current_dt = datetime.strptime(str(current_time), "%H:%M:%S")
+    # Se formatea explícitamente sin microsegundos antes de re-parsear.
+    current_dt = datetime.strptime(datetime.now().strftime("%H:%M:%S"), "%H:%M:%S")
 
     start_with_buffer = start - tolerance
     end_with_buffer   = end + tolerance
