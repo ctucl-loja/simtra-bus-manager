@@ -8,11 +8,11 @@ from dotenv import load_dotenv
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-LOCAL_BACKEND = os.getenv("LOCAL_BACKEND")
-BACKEND_URL = os.getenv("BACKEND_URL")
-BACKEND_USERNAME = os.getenv("BACKEND_USERNAME")
-BACKEND_PASSWORD = os.getenv("BACKEND_PASSWORD")
-BUS_REGISTER = int(os.getenv("BUS_REGISTER", 0))
+LOCAL_BACKEND = os.getenv("FAST_API_LOCAL_BACKEND")
+BACKEND_URL = os.getenv("FAST_API_BACKEND_URL")
+BACKEND_USERNAME = os.getenv("FAST_API_BACKEND_USERNAME")
+BACKEND_PASSWORD = os.getenv("FAST_API_BACKEND_PASSWORD")
+BUS_REGISTER = int(os.getenv("FAST_API_BUS_REGISTER", 0))
 
 
 # ─────────────────────────────────────────────

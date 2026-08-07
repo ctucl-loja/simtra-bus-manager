@@ -54,13 +54,13 @@ log = setup_logger()
 # ─────────────────────────────────────────────
 
 load_dotenv()
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS"))
-WATCHER_INTERVAL_SECONDS = int(os.getenv("WATCHER_INTERVAL_SECONDS"))  # cada 10s el watcher evalúa si el turno cambió
-LOCAL_BACKEND = os.getenv("LOCAL_BACKEND")
-BACKEND_URL = os.getenv("BACKEND_URL")
-BACKEND_USERNAME = os.getenv("BACKEND_USERNAME")
-BACKEND_PASSWORD = os.getenv("BACKEND_PASSWORD")
-BUS_REGISTER = int(os.getenv("BUS_REGISTER", 0))
+POLL_INTERVAL_SECONDS = int(os.getenv("FAST_API_POLL_INTERVAL_SECONDS"))
+WATCHER_INTERVAL_SECONDS = int(os.getenv("FAST_API_WATCHER_INTERVAL_SECONDS"))  # cada 10s el watcher evalúa si el turno cambió
+LOCAL_BACKEND = os.getenv("FAST_API_LOCAL_BACKEND")
+BACKEND_URL = os.getenv("FAST_API_BACKEND_URL")
+BACKEND_USERNAME = os.getenv("FAST_API_BACKEND_USERNAME")
+BACKEND_PASSWORD = os.getenv("FAST_API_BACKEND_PASSWORD")
+BUS_REGISTER = int(os.getenv("FAST_API_BUS_REGISTER", 0))
 
 # ─────────────────────────────────────────────
 # API - CLIENT
