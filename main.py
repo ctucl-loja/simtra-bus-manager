@@ -1,7 +1,9 @@
 from fastapi import FastAPI, Depends
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import Optional
 from zoneinfo import ZoneInfo
+from pathlib import Path
 import models
 from database import engine, SessionLocal
 from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate, EventCreate, EventResponse
@@ -9,6 +11,7 @@ import crud
 from datetime import datetime
 
 ECUADOR_TZ = ZoneInfo("America/Guayaquil")
+STATIC_DIR = Path(__file__).parent / "static"
 models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="SIMTRA TRACKING API")
 
@@ -109,3 +112,10 @@ def read_events(
     db: Session = Depends(get_db),
 ):
     return crud.get_events(db, priority, event_type, start_date, end_date, limit)
+
+
+#herramienta de prueba: inyector manual de GPS
+
+@app.get("/gps-tool")
+def gps_tool_page():
+    return FileResponse(STATIC_DIR / "gps_injector.html")

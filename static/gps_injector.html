@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>SIMTRA — Inyector manual de GPS</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+    #layout { display: flex; height: 100%; }
+    #panel {
+        width: 320px;
+        flex-shrink: 0;
+        padding: 16px;
+        background: #1f2430;
+        color: #e6e6e6;
+        overflow-y: auto;
+        box-sizing: border-box;
+    }
+    #panel h1 { font-size: 16px; margin: 0 0 4px; }
+    #panel .subtitle { font-size: 12px; color: #9aa0ac; margin-bottom: 16px; }
+    #map { flex: 1; }
+    .field { margin-bottom: 10px; }
+    .field .label { font-size: 11px; text-transform: uppercase; color: #9aa0ac; letter-spacing: .04em; }
+    .field .value { font-size: 14px; word-break: break-word; }
+    .badge {
+        display: inline-block; padding: 2px 8px; border-radius: 10px;
+        font-size: 11px; font-weight: 600;
+    }
+    .badge.ok { background: #1e4620; color: #7ee787; }
+    .badge.warn { background: #4a3a12; color: #f2c94c; }
+    hr { border: none; border-top: 1px solid #333a47; margin: 14px 0; }
+    .hint { font-size: 12px; color: #9aa0ac; line-height: 1.4; }
+    button {
+        width: 100%; padding: 8px; margin-top: 6px; cursor: pointer;
+        background: #2d3444; color: #e6e6e6; border: 1px solid #3d4457; border-radius: 6px;
+    }
+    button:hover { background: #3a4258; }
+    .checkpoint-icon {
+        background: #2563eb; color: white; border-radius: 50%;
+        width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+        font-size: 12px; font-weight: 700; border: 2px solid white; box-shadow: 0 0 3px rgba(0,0,0,.5);
+    }
+</style>
+</head>
+<body>
+<div id="layout">
+    <div id="panel">
+        <h1>Inyector manual de GPS</h1>
+        <div class="subtitle">Herramienta de prueba — escribe directamente en la tabla <code>gps</code></div>
+
+        <div class="field">
+            <div class="label">Despacho</div>
+            <div class="value" id="f-dispatch">Cargando…</div>
+        </div>
+        <div class="field">
+            <div class="label">Step actual (visualización)</div>
+            <div class="value" id="f-step">—</div>
+        </div>
+        <div class="field">
+            <div class="label">Checkpoints en el step</div>
+            <div class="value" id="f-checkpoint-count">—</div>
+        </div>
+
+        <hr>
+
+        <div class="field">
+            <div class="label">Último punto GPS insertado</div>
+            <div class="value" id="f-last-point">Ninguno todavía</div>
+        </div>
+        <div class="field">
+            <div class="label">Hora del último registro</div>
+            <div class="value" id="f-last-time">—</div>
+        </div>
+        <div class="field" id="f-last-status"></div>
+
+        <hr>
+        <button id="btn-refresh">Refrescar despacho</button>
+
+        <hr>
+        <div class="hint">
+            Haz clic en cualquier punto del mapa para insertar una posición GPS
+            con la hora actual. <code>bus_monitor.py</code> la procesa como si
+            viniera del GPS real (mismo endpoint <code>POST /api/gps</code> que
+            usa <code>navigation_simulation.py</code>).
+        </div>
+    </div>
+    <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const DEFAULT_CENTER = [-4.0, -79.2]; // Loja, Ecuador — zona de operacion del bus
+const map = L.map('map').setView(DEFAULT_CENTER, 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+let lastInsertedMarker = null;
+let routeLayerGroup = L.layerGroup().addTo(map);
+
+/**
+ * Selecciona el "step actual" SOLO para fines de visualizacion en esta
+ * herramienta. No reemplaza ni interfiere con la logica real de
+ * bus_monitor.py (que vive exclusivamente en ese proceso, con su propio
+ * estado y sus reglas de avance por geocerca).
+ */
+function pickCurrentStepForDisplay(steps) {
+    if (!steps || steps.length === 0) return null;
+
+    const toMinutes = (hms) => {
+        const [h, m] = hms.split(':').map(Number);
+        return h * 60 + m;
+    };
+    const now = new Date();
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    const TOLERANCE = 5;
+
+    let upcoming = null;
+    for (const step of steps) {
+        const start = toMinutes(step.start_schedule) - TOLERANCE;
+        const end = toMinutes(step.end_schedule) + TOLERANCE;
+        if (nowMinutes >= start && nowMinutes <= end) {
+            return step;
+        }
+        if (start > nowMinutes && (upcoming === null || start < (toMinutes(upcoming.start_schedule) - TOLERANCE))) {
+            upcoming = step;
+        }
+    }
+    // Sin step activo ni proximo: se muestra el ultimo del dia como referencia.
+    return upcoming || steps[steps.length - 1];
+}
+
+function renderStepOnMap(step) {
+    routeLayerGroup.clearLayers();
+    if (!step || !step.checkpoints || step.checkpoints.length === 0) {
+        document.getElementById('f-checkpoint-count').textContent = '0';
+        return;
+    }
+
+    const checkpoints = [...step.checkpoints].sort((a, b) => a.order - b.order);
+    const latLngs = [];
+
+    checkpoints.forEach((ckpt) => {
+        const p = ckpt.point;
+        const latlng = [p.latitude, p.longitude];
+        latLngs.push(latlng);
+
+        L.circle(latlng, {
+            radius: p.radius,
+            color: '#2563eb',
+            weight: 1,
+            fillColor: '#2563eb',
+            fillOpacity: 0.12,
+        }).addTo(routeLayerGroup);
+
+        const icon = L.divIcon({
+            className: '',
+            html: `<div class="checkpoint-icon">${ckpt.order}</div>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12],
+        });
+
+        L.marker(latlng, { icon }).addTo(routeLayerGroup).bindPopup(`
+            <b>${p.name}</b><br>
+            Orden: ${ckpt.order}<br>
+            Checkpoint id: ${ckpt.id}<br>
+            Programado: ${ckpt.time_calculated}<br>
+            Reportado: ${ckpt.time_reported}<br>
+            Radio geocerca: ${p.radius} m
+        `);
+    });
+
+    L.polyline(latLngs, { color: '#2563eb', weight: 3, opacity: 0.6, dashArray: '6 6' }).addTo(routeLayerGroup);
+
+    document.getElementById('f-checkpoint-count').textContent = checkpoints.length;
+    map.fitBounds(L.latLngBounds(latLngs), { padding: [30, 30] });
+}
+
+async function loadDispatch() {
+    document.getElementById('f-dispatch').textContent = 'Cargando…';
+    document.getElementById('f-step').textContent = '—';
+
+    const resp = await fetch('/api/dispatch');
+    if (!resp.ok) {
+        document.getElementById('f-dispatch').innerHTML = '<span class="badge warn">Error al consultar</span>';
+        return;
+    }
+    const dispatch = await resp.json();
+
+    if (!dispatch) {
+        document.getElementById('f-dispatch').innerHTML = '<span class="badge warn">Sin despacho cacheado</span>';
+        document.getElementById('f-step').textContent = '—';
+        document.getElementById('f-checkpoint-count').textContent = '0';
+        return;
+    }
+
+    document.getElementById('f-dispatch').innerHTML =
+        `bus ${dispatch.register} — ${dispatch.date} <span class="badge ok">OK</span>`;
+
+    const step = pickCurrentStepForDisplay(dispatch.data);
+    if (!step) {
+        document.getElementById('f-step').textContent = 'Sin steps en el despacho';
+        return;
+    }
+
+    document.getElementById('f-step').textContent =
+        `${step.code || '?'} (step ${step.step}) — ${step.start_schedule} → ${step.end_schedule}`;
+
+    renderStepOnMap(step);
+}
+
+async function insertGpsPoint(lat, lon) {
+    const body = {
+        latitude: lat,
+        longitude: lon,
+        speed: 0,                        // sin dato real de velocidad; nunca null (bus_monitor no lo tolera)
+        timestamp: new Date().toISOString(),
+    };
+
+    document.getElementById('f-last-status').innerHTML = '';
+    const resp = await fetch('/api/gps', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) {
+        document.getElementById('f-last-status').innerHTML = '<span class="badge warn">Error al insertar</span>';
+        return;
+    }
+
+    const saved = await resp.json();
+
+    if (lastInsertedMarker) {
+        map.removeLayer(lastInsertedMarker);
+    }
+    lastInsertedMarker = L.circleMarker([saved.latitude, saved.longitude], {
+        radius: 8, color: '#e11d48', fillColor: '#e11d48', fillOpacity: 0.9,
+    }).addTo(map).bindPopup('Última posición GPS insertada manualmente').openPopup();
+
+    document.getElementById('f-last-point').textContent =
+        `${saved.latitude.toFixed(6)}, ${saved.longitude.toFixed(6)}`;
+    document.getElementById('f-last-time').textContent = saved.timestamp;
+    document.getElementById('f-last-status').innerHTML = '<span class="badge ok">Insertado en /api/gps</span>';
+}
+
+map.on('click', (e) => insertGpsPoint(e.latlng.lat, e.latlng.lng));
+document.getElementById('btn-refresh').addEventListener('click', loadDispatch);
+
+loadDispatch();
+</script>
+</body>
+</html>
