@@ -39,3 +39,23 @@ class PassengerResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+class DispatchCreate(BaseModel):
+    date: str
+    register: int
+    data: list[dict]
+
+
+class DispatchResponse(DispatchCreate):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DispatchCheckpointUpdate(BaseModel):
+    step: int
+    checkpoint_id: int
+    time_reported: str
+

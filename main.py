@@ -4,7 +4,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 import models
 from database import engine, SessionLocal
-from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate
+from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate
 import crud
 from datetime import datetime
 
@@ -76,3 +76,18 @@ def update_status_passenger(id: int, db: Session = Depends(get_db)):
 @app.get("/api/passenger/pending")
 def get_pending_passenger(db: Session = Depends(get_db)):
     return crud.get_pending_passengers(db)
+
+
+#endpoints dispatch
+
+@app.post("/api/dispatch", response_model=DispatchResponse)
+def save_dispatch(data: DispatchCreate, db: Session = Depends(get_db)):
+    return crud.save_dispatch(db, data)
+
+@app.get("/api/dispatch", response_model=Optional[DispatchResponse])
+def read_dispatch(db: Session = Depends(get_db)):
+    return crud.get_last_dispatch(db)
+
+@app.patch("/api/dispatch/checkpoint", response_model=Optional[DispatchResponse])
+def update_dispatch_checkpoint(data: DispatchCheckpointUpdate, db: Session = Depends(get_db)):
+    return crud.update_dispatch_checkpoint(db, data.step, data.checkpoint_id, data.time_reported)

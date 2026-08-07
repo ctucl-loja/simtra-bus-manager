@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
-from models import Gps,CheckPoint,Passenger
-from schemas import GPSDataCreate,PassengerCreate
+from sqlalchemy.orm.attributes import flag_modified
+from models import Gps,CheckPoint,Passenger,Dispatch
+from schemas import GPSDataCreate,PassengerCreate,DispatchCreate
 from datetime import datetime, timezone
 from datetime import datetime,time
 
@@ -115,3 +116,47 @@ def upload_pending_passengers(db: Session, id: int):
     db.commit()
     db.refresh(passenger)
     return passenger
+
+
+def save_dispatch(db: Session, data: DispatchCreate):
+    existing = db.query(Dispatch).filter(
+        Dispatch.date == data.date,
+        Dispatch.register == data.register
+    ).first()
+
+    if existing:
+        existing.data = data.data
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    dispatch = Dispatch(date=data.date, register=data.register, data=data.data)
+    db.add(dispatch)
+    db.commit()
+    db.refresh(dispatch)
+    return dispatch
+
+
+def get_last_dispatch(db: Session):
+    return db.query(Dispatch).order_by(Dispatch.created_at.desc()).first()
+
+
+def update_dispatch_checkpoint(db: Session, step: int, checkpoint_id: int, time_reported: str):
+    """Actualiza time_reported del checkpoint checkpoint_id dentro del step indicado,
+    siempre sobre el despacho más reciente almacenado localmente."""
+    dispatch = get_last_dispatch(db)
+    if not dispatch:
+        return None
+
+    for s in dispatch.data:
+        if s.get("step") == step:
+            for ckpt in s.get("checkpoints", []):
+                if ckpt.get("id") == checkpoint_id:
+                    ckpt["time_reported"] = time_reported
+                    break
+            break
+
+    flag_modified(dispatch, "data")
+    db.commit()
+    db.refresh(dispatch)
+    return dispatch

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Float, DateTime,String,Boolean
+from sqlalchemy import Column, Integer, Float, DateTime,String,Boolean,JSON
 from datetime import datetime, timezone
 from datetime import datetime
 from database import Base
@@ -22,6 +22,14 @@ class CheckPoint(Base):
     upload = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+
+class Dispatch(Base):
+    __tablename__ = "dispatch"
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(String, nullable=False, index=True)
+    register = Column(Integer, nullable=False, index=True)
+    data = Column(JSON, nullable=False)   # lista de steps/checkpoints tal como la entrega el backend
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class Passenger(Base):
