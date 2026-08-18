@@ -63,112 +63,279 @@ BACKEND_USERNAME = os.getenv("FAST_API_BACKEND_USERNAME")
 BACKEND_PASSWORD = os.getenv("FAST_API_BACKEND_PASSWORD")
 BUS_REGISTER = int(os.getenv("FAST_API_BUS_REGISTER", 0))
 
+# Reintento de consulta de despachos cuando el bus arranca sin ninguno (reserva,
+# mantenimiento o backend caído). El watcher no duerme este tiempo: solo evita
+# repreguntar antes de que transcurra.
+NO_DISPATCH_RETRY_SECONDS = 60
+
+# Omisiones toleradas antes de considerar la secuencia inconsistente. Solo se
+# aplica al cierre tardío de un recorrido (ver resolve_checkpoint_candidate).
+MAX_SKIPPED_CHECKPOINTS = 2
+
+# Ventana de gracia para cerrar el último checkpoint del ÚLTIMO step del día.
+# En BETWEEN_STEPS el cierre tardío queda acotado naturalmente por el
+# start_schedule del siguiente step; después del último recorrido no existe ese
+# límite, así que se acota aquí. NO es la vieja tolerancia de horario: no
+# adelanta ningún step ni habilita marcaciones de un despacho que no comenzó.
+CLOSING_GRACE_MINUTES = 10
+
+# Tolerancia con la que se clasifica una llegada como "a tiempo" en el evento
+# que ve el conductor. Es SOLO una clasificación informativa: no interviene en
+# la selección de steps, la autorización de marcaje ni ninguna decisión horaria.
+ON_TIME_TOLERANCE_SECONDS = 30
+
 # ─────────────────────────────────────────────
 # API - CLIENT
 # ─────────────────────────────────────────────
 
 simtra = ApiService(BACKEND_URL, BACKEND_USERNAME, BACKEND_PASSWORD)
 
+
+# ─────────────────────────────────────────────
+# CONTEXTO TEMPORAL
+#
+# Única fuente de verdad sobre en qué momento del día está el bus. Se calcula
+# exclusivamente con la fecha y los horarios del despacho — nunca con el GPS:
+#
+#   HORARIO      → define el step autorizado a recibir marcaciones
+#   GPS          → solo detecta la entrada a una geocerca
+#   SECUENCIA    → decide si ese checkpoint es coherente
+#   PERSISTENCIA → registra el evento
+# ─────────────────────────────────────────────
+
+BEFORE_FIRST_STEP = "BEFORE_FIRST_STEP"   # el primer recorrido del día aún no empieza
+ACTIVE_STEP       = "ACTIVE_STEP"         # hay un recorrido dentro de su horario
+BETWEEN_STEPS     = "BETWEEN_STEPS"       # uno terminó y el siguiente todavía no empieza
+AFTER_LAST_STEP   = "AFTER_LAST_STEP"     # todos los recorridos del día terminaron
+
+
+def step_number(step: Optional[dict]) -> Optional[int]:
+    return step.get("step") if step else None
+
+
+def schedule_seconds(value: str) -> int:
+    """'HH:MM:SS' → segundos desde medianoche."""
+    hours, minutes, seconds = (int(part) for part in value.split(":"))
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def now_seconds(now: datetime) -> int:
+    """
+    Hora del día de `now` en segundos. Se calcula con los campos del datetime en
+    vez de strptime: el formato "%H:%M:%S" no tolera los microsegundos que
+    arrastra datetime.now().
+    """
+    return now.hour * 3600 + now.minute * 60 + now.second
+
+
+# Estados de puntualidad. Nombres técnicos estables: la traducción a
+# "Adelantado / A tiempo / Atrasado" es responsabilidad de la UI.
+EARLY   = "EARLY"
+ON_TIME = "ON_TIME"
+LATE    = "LATE"
+
+ARRIVAL_LABELS = {EARLY: "ADELANTADO", ON_TIME: "A TIEMPO", LATE: "ATRASADO"}
+
+HALF_DAY_SECONDS = 12 * 3600
+DAY_SECONDS      = 24 * 3600
+
+
+def calculate_arrival_status(scheduled_time: str, reported_time: str) -> Optional[dict]:
+    """
+    Compara la hora programada del checkpoint (`time_calculated`) con la hora
+    real de llegada (`time_reported`).
+
+        difference_seconds > 0  → llegó después  → LATE
+        difference_seconds < 0  → llegó antes    → EARLY
+        |difference| <= ON_TIME_TOLERANCE_SECONDS → ON_TIME
+
+    Devuelve None si alguna de las horas no es parseable, para que el evento se
+    emita igual (con los datos del punto) sin inventar una clasificación.
+    """
+    try:
+        difference = schedule_seconds(reported_time) - schedule_seconds(scheduled_time)
+    except (AttributeError, ValueError):
+        log.warning(
+            f"[ARRIVAL] Horas no parseables: programada={scheduled_time!r} "
+            f"reportada={reported_time!r}"
+        )
+        return None
+
+    # Cruce de medianoche: un recorrido que termina pasadas las 00:00 daría una
+    # diferencia de casi un día entero; se normaliza al desfase más corto.
+    if difference > HALF_DAY_SECONDS:
+        difference -= DAY_SECONDS
+    elif difference < -HALF_DAY_SECONDS:
+        difference += DAY_SECONDS
+
+    if difference > ON_TIME_TOLERANCE_SECONDS:
+        status = LATE
+    elif difference < -ON_TIME_TOLERANCE_SECONDS:
+        status = EARLY
+    else:
+        status = ON_TIME
+
+    return {"status": status, "difference_seconds": difference}
+
+
+@dataclass(frozen=True)
+class TemporalContext:
+    """
+    Fotografía inmutable del momento del día.
+
+    `current_step` SOLO existe en ACTIVE_STEP: es el único step autorizado a
+    recibir marcaciones normales. Un step que todavía no empieza vive en
+    `next_step` y nunca en `current_step` — esa separación es la que impide que
+    un despacho futuro reciba checkpoints por adelantado.
+    """
+    state:         str
+    previous_step: Optional[dict] = None
+    current_step:  Optional[dict] = None
+    next_step:     Optional[dict] = None
+
+    @property
+    def key(self) -> tuple:
+        """Identidad del contexto: sirve para loguear solo cuando algo cambió."""
+        return (
+            self.state,
+            step_number(self.previous_step),
+            step_number(self.current_step),
+            step_number(self.next_step),
+        )
+
+    def describe(self) -> str:
+        if self.state == ACTIVE_STEP:
+            step = self.current_step
+            return (
+                f"state={ACTIVE_STEP} step={step['step']} "
+                f"horario={step['start_schedule']}→{step['end_schedule']}"
+            )
+        if self.state == BETWEEN_STEPS:
+            return (
+                f"state={BETWEEN_STEPS} previous={step_number(self.previous_step)} "
+                f"next={step_number(self.next_step)} "
+                f"(inicia {self.next_step['start_schedule']})"
+            )
+        if self.state == BEFORE_FIRST_STEP:
+            if self.next_step is None:
+                return f"state={BEFORE_FIRST_STEP} (sin despachos)"
+            return (
+                f"state={BEFORE_FIRST_STEP} next={step_number(self.next_step)} "
+                f"(inicia {self.next_step['start_schedule']})"
+            )
+        return f"state={AFTER_LAST_STEP} previous={step_number(self.previous_step)}"
+
+
+def resolve_temporal_context(dispatches: list[dict], now: datetime) -> TemporalContext:
+    """
+    Resuelve el estado temporal del día a partir ÚNICAMENTE de los horarios.
+
+    Fronteras estrictas: un step está activo si `start <= now <= end`, sin
+    tolerancia. Un step que empieza en 4 minutos NO está activo.
+
+    Sin despachos devuelve BEFORE_FIRST_STEP sin steps: un estado sin
+    `current_step` ni `previous_step` no puede autorizar ninguna escritura.
+    """
+    if not dispatches:
+        return TemporalContext(state=BEFORE_FIRST_STEP)
+
+    steps = sorted(dispatches, key=lambda s: schedule_seconds(s["start_schedule"]))
+    current_sec = now_seconds(now)
+
+    active_indexes = [
+        i for i, step in enumerate(steps)
+        if schedule_seconds(step["start_schedule"]) <= current_sec <= schedule_seconds(step["end_schedule"])
+    ]
+
+    if active_indexes:
+        if len(active_indexes) > 1:
+            solapados = [step_number(steps[i]) for i in active_indexes]
+            log.warning(f"[TEMPORAL] Horarios solapados: steps {solapados} — se usa el primero")
+        index = active_indexes[0]
+        return TemporalContext(
+            state=ACTIVE_STEP,
+            previous_step=steps[index - 1] if index > 0 else None,
+            current_step=steps[index],
+            next_step=steps[index + 1] if index + 1 < len(steps) else None,
+        )
+
+    if current_sec < schedule_seconds(steps[0]["start_schedule"]):
+        return TemporalContext(state=BEFORE_FIRST_STEP, next_step=steps[0])
+
+    finished = [s for s in steps if schedule_seconds(s["end_schedule"]) < current_sec]
+    upcoming = [s for s in steps if schedule_seconds(s["start_schedule"]) > current_sec]
+
+    if not upcoming:
+        return TemporalContext(
+            state=AFTER_LAST_STEP,
+            previous_step=finished[-1] if finished else None,
+        )
+
+    return TemporalContext(
+        state=BETWEEN_STEPS,
+        previous_step=finished[-1] if finished else None,
+        next_step=upcoming[0],
+    )
+
+
 # ─────────────────────────────────────────────
 # ESTADO GLOBAL + LOCK
+#
+# El lock protege únicamente lecturas/escrituras rápidas en memoria. Nunca se
+# mantiene tomado durante HTTP, audio ni ninguna otra I/O.
 # ─────────────────────────────────────────────
 
 _lock = threading.Lock()
 
-ALL_DISPATCHES: list[dict]      = []   # todos los despachos del día
-CURRENT_INDEX:  Optional[int]   = None   # posición del step activo dentro de ALL_DISPATCHES
-CURRENT_STEP:   Optional[dict]  = None   # alias de ALL_DISPATCHES[CURRENT_INDEX]
-GEOFENCES:      list[dict]      = []
-DISPATCHED:     bool            = False
-REPORTED_CHECKPOINTS: set[int]  = set()  # ids de checkpoint ya reportados hoy (evita doble reporte)
+ALL_DISPATCHES:  list[dict]      = []                                   # todos los despachos del día
+CURRENT_CONTEXT: TemporalContext = TemporalContext(state=BEFORE_FIRST_STEP)
+REPORTED_CHECKPOINTS: set[int]   = set()                                # ids de checkpoint ya reportados hoy
+
+
+def get_dispatches() -> list[dict]:
+    """
+    Snapshot de los despachos. La lista se reemplaza entera, nunca se muta en
+    sitio, así que devolver la referencia bajo lock es seguro.
+    """
+    with _lock:
+        return ALL_DISPATCHES
+
+
+def get_context() -> TemporalContext:
+    with _lock:
+        return CURRENT_CONTEXT
+
+
+def get_reported_snapshot() -> frozenset:
+    with _lock:
+        return frozenset(REPORTED_CHECKPOINTS)
+
+
+def reserve_checkpoint(checkpoint_id: int) -> bool:
+    """
+    Test-and-set atómico: devuelve True si este hilo se quedó con el derecho de
+    reportar el checkpoint. Se reserva ANTES de la persistencia para que dos
+    entradas de geocerca casi simultáneas no lo reporten dos veces.
+    """
+    with _lock:
+        if checkpoint_id in REPORTED_CHECKPOINTS:
+            return False
+        REPORTED_CHECKPOINTS.add(checkpoint_id)
+        return True
+
+
+def reset_daily_state():
+    """Borra el rastro del día anterior: ningún step viejo debe quedar elegible."""
+    global ALL_DISPATCHES, CURRENT_CONTEXT
+    with _lock:
+        ALL_DISPATCHES  = []
+        CURRENT_CONTEXT = TemporalContext(state=BEFORE_FIRST_STEP)
+        REPORTED_CHECKPOINTS.clear()
 
 
 # ─────────────────────────────────────────────
-# LÓGICA DE DESPACHO
+# CARGA DE DESPACHOS
 # ─────────────────────────────────────────────
-
-from datetime import datetime, timedelta
-
-def get_current_step(steps: list[dict]) -> Optional[dict]:
-    """
-    Evalúa la lista de despachos con tolerancia de ±5 minutos.
-    """
-    if not steps:
-        return None
-
-    # Se formatea explícitamente sin microsegundos antes de re-parsear;
-    # str(datetime.now().time()) a veces incluye microsegundos (".111463")
-    # y eso rompe strptime con el formato "%H:%M:%S".
-    current_dt = datetime.strptime(datetime.now().strftime("%H:%M:%S"), "%H:%M:%S")
-    TOLERANCE_MINUTES = 5
-    tolerance = timedelta(minutes=TOLERANCE_MINUTES)
-
-    upcoming = []
-
-    for step in steps:
-        start = datetime.strptime(step['start_schedule'], "%H:%M:%S")
-        end   = datetime.strptime(step['end_schedule'],   "%H:%M:%S")
-
-        # Aplicar tolerancia: ±5 minutos
-        start_with_buffer = start - tolerance
-        end_with_buffer   = end + tolerance
-
-        if start_with_buffer <= current_dt <= end_with_buffer:
-            return step
-
-        if start_with_buffer > current_dt:
-            upcoming.append(step)
-
-    if upcoming:
-        return min(upcoming, key=lambda s: s['start_schedule'])
-
-    return None
-
-
-def is_step_active(step: dict) -> bool:
-    """
-    Retorna True si está dentro del rango ±5 minutos.
-    """
-    TOLERANCE_MINUTES = 5
-    tolerance = timedelta(minutes=TOLERANCE_MINUTES)
-
-    start = datetime.strptime(step['start_schedule'], "%H:%M:%S")
-    end   = datetime.strptime(step['end_schedule'],   "%H:%M:%S")
-    # Se formatea explícitamente sin microsegundos antes de re-parsear.
-    current_dt = datetime.strptime(datetime.now().strftime("%H:%M:%S"), "%H:%M:%S")
-
-    start_with_buffer = start - tolerance
-    end_with_buffer   = end + tolerance
-
-    return start_with_buffer <= current_dt <= end_with_buffer
-
-
-def is_in_transition_period(current_step: dict, next_step: Optional[dict]) -> bool:
-    """
-    True si el horario del step actual ya terminó y el siguiente todavía no
-    empieza. Es la ventana en la que el bus, adelantado, puede volver a
-    atravesar físicamente geocercas del recorrido que acaba de terminar
-    camino al siguiente.
-
-    Sin step siguiente no hay ambigüedad posible (ninguna geocerca puede
-    pertenecer a un recorrido posterior), así que no se considera transición y
-    el cierre del último checkpoint del día sigue funcionando como siempre.
-    """
-    if next_step is None:
-        return False
-
-    # Se formatea sin microsegundos antes de re-parsear (mismo motivo que en
-    # get_current_step: strptime con "%H:%M:%S" no tolera ".111463").
-    now = datetime.strptime(datetime.now().strftime("%H:%M:%S"), "%H:%M:%S")
-    end_current = datetime.strptime(current_step["end_schedule"], "%H:%M:%S")
-
-    # is_step_active ya aplica la tolerancia de ±5 min; el segundo chequeo
-    # distingue "ya terminó" de "todavía no empieza" (ambos dan inactivo).
-    if is_step_active(current_step) or now <= end_current:
-        return False
-
-    return not is_step_active(next_step)
-
 
 def load_all_dispatches(date: Optional[str] = None) -> bool:
     """
@@ -184,13 +351,15 @@ def load_all_dispatches(date: Optional[str] = None) -> bool:
     try:
         dispatches = simtra.get_dispatch(BUS_REGISTER, query_date)
         if not dispatches:
-            ALL_DISPATCHES = []
+            with _lock:
+                ALL_DISPATCHES = []
             log.warning("La API no devolvió despachos para hoy")
             return False
-        ALL_DISPATCHES = dispatches
-        log.info(f"Despachos cargados: {len(ALL_DISPATCHES)} turno(s)")
-        seed_reported_checkpoints(ALL_DISPATCHES)
-        cache_dispatch_locally(ALL_DISPATCHES, query_date)
+        with _lock:
+            ALL_DISPATCHES = dispatches
+        log.info(f"Despachos cargados: {len(dispatches)} turno(s)")
+        seed_reported_checkpoints(dispatches)
+        cache_dispatch_locally(dispatches, query_date)
         sync_vehicle_info()
         return True
     except Exception as e:
@@ -226,89 +395,6 @@ def cache_vehicle_locally(vehicle: dict):
         log.error(f"No se pudo cachear la información del vehículo: {e}")
 
 
-def seed_reported_checkpoints(dispatches: list[dict]):
-    """
-    Marca como ya reportados (en memoria) los checkpoints que el backend remoto
-    ya trae con time_reported distinto de '00:00:00'. Evita reportarlos de nuevo
-    si el proceso se reinicia a mitad del día.
-    """
-    for step in dispatches:
-        for ckpt in step["checkpoints"]:
-            if ckpt.get("time_reported", "00:00:00") != "00:00:00":
-                REPORTED_CHECKPOINTS.add(ckpt["id"])
-
-
-def step_index(step: dict) -> Optional[int]:
-    """Ubica la posición de un step dentro de ALL_DISPATCHES según su número de step."""
-    for i, s in enumerate(ALL_DISPATCHES):
-        if s.get("step") == step.get("step"):
-            return i
-    return None
-
-
-def get_step_context(index: Optional[int]) -> tuple[Optional[dict], Optional[dict], Optional[dict]]:
-    """Devuelve (step_anterior, step_actual, step_siguiente) según el índice en ALL_DISPATCHES."""
-    if index is None or not (0 <= index < len(ALL_DISPATCHES)):
-        return None, None, None
-    prev_step = ALL_DISPATCHES[index - 1] if index > 0 else None
-    next_step = ALL_DISPATCHES[index + 1] if index + 1 < len(ALL_DISPATCHES) else None
-    return prev_step, ALL_DISPATCHES[index], next_step
-
-
-def merge_geofences(*steps: Optional[dict]) -> list[dict]:
-    """Une, sin duplicar por id de punto, las geocercas de los steps recibidos."""
-    merged: dict[int, dict] = {}
-    for step in steps:
-        if not step:
-            continue
-        for ckpt in step["checkpoints"]:
-            point = ckpt["point"]
-            merged.setdefault(point["id"], point)
-    return list(merged.values())
-
-
-def get_upcoming_checkpoints(step: dict, after_order: int, count: int) -> list[dict]:
-    """
-    Devuelve hasta `count` checkpoints posteriores a after_order dentro de step,
-    continuando en los steps siguientes de ALL_DISPATCHES si hace falta (cruza
-    de step igual que la ventana de geocercas).
-    """
-    result: list[dict] = []
-    idx = step_index(step)
-    if idx is None:
-        return result
-
-    remaining = sorted(
-        (c for c in step["checkpoints"] if c["order"] > after_order),
-        key=lambda c: c["order"],
-    )
-    result.extend(remaining)
-
-    next_idx = idx + 1
-    while len(result) < count and next_idx < len(ALL_DISPATCHES):
-        result.extend(sorted(ALL_DISPATCHES[next_idx]["checkpoints"], key=lambda c: c["order"]))
-        next_idx += 1
-
-    return result[:count]
-
-
-def prefetch_upcoming_audio(step: dict, after_order: int, count: int = 2):
-    """
-    Prepara con anticipación el audio de los siguientes `count` checkpoints
-    después de after_order (cruzando de step si hace falta), para que estén
-    listos antes de que el bus llegue físicamente. No bloquea.
-    """
-    upcoming = get_upcoming_checkpoints(step, after_order, count + 1)
-    for i in range(min(count, len(upcoming))):
-        ckpt = upcoming[i]
-        nxt = upcoming[i + 1] if i + 1 < len(upcoming) else None
-        audio_announcer.prepare(
-            ckpt["id"],
-            ckpt["point"]["name"],
-            nxt["point"]["name"] if nxt else None,
-        )
-
-
 def cache_dispatch_locally(dispatches: list[dict], date: str):
     """
     Guarda los despachos del día en el backend local (API - CLIENT) para que
@@ -327,136 +413,198 @@ def cache_dispatch_locally(dispatches: list[dict], date: str):
         log.error(f"No se pudo cachear los despachos localmente: {e}")
 
 
-def apply_step(step: Optional[dict], monitor_ref: list):
+def seed_reported_checkpoints(dispatches: list[dict]):
     """
-    Sincroniza el estado global con el step recibido y amplía la ventana de
-    geocercas monitoreadas (anterior + actual + siguiente) de forma aditiva,
-    sin perder el estado de geocercas ya en seguimiento.
-    Nunca retrocede un CURRENT_INDEX que un avance por GPS ya superó (Regla 5:
-    el horario nunca deshace un avance real).
+    Marca como ya reportados (en memoria) los checkpoints que el backend remoto
+    ya trae con time_reported distinto de '00:00:00'. Evita reportarlos de nuevo
+    si el proceso se reinicia a mitad del día.
+    """
+    with _lock:
+        for step in dispatches:
+            for ckpt in step["checkpoints"]:
+                if ckpt.get("time_reported", "00:00:00") != "00:00:00":
+                    REPORTED_CHECKPOINTS.add(ckpt["id"])
+
+
+# ─────────────────────────────────────────────
+# VENTANA DE GEOCERCAS
+#
+# Define qué geocercas se OBSERVAN físicamente. No tiene relación con qué step
+# está autorizado a escribir: que una geocerca esté cargada en el
+# GeofenceMonitor no significa que su checkpoint pueda registrarse.
+# ─────────────────────────────────────────────
+
+def step_index(dispatches: list[dict], step: dict) -> Optional[int]:
+    """Ubica la posición de un step dentro de la lista según su número de step."""
+    for i, s in enumerate(dispatches):
+        if s.get("step") == step.get("step"):
+            return i
+    return None
+
+
+def merge_geofences(*steps: Optional[dict]) -> list[dict]:
+    """
+    Une, sin duplicar por id de punto, las geocercas de los steps recibidos.
+
+    Deduplicar por point.id es correcto a nivel FÍSICO: un mismo punto
+    geográfico se vigila una sola vez. La identidad del checkpoint (step +
+    checkpoint id + horario) se resuelve después, en resolve_checkpoint_candidate.
+    """
+    merged: dict[int, dict] = {}
+    for step in steps:
+        if not step:
+            continue
+        for ckpt in step["checkpoints"]:
+            point = ckpt["point"]
+            merged.setdefault(point["id"], point)
+    return list(merged.values())
+
+
+# ─────────────────────────────────────────────
+# AUDIO
+#
+# El subsistema de audio se identifica por checkpoint["point"]["id"] (el punto
+# físico), NUNCA por checkpoint["id"]:
+#
+#     checkpoint["id"]          → persistencia y sincronización con el backend
+#     checkpoint["point"]["id"] → cache y reutilización del mp3
+#
+# Un mismo punto se repite en varios steps y líneas, así que su audio se genera
+# una sola vez y se reutiliza (ver services/audio_announcer.py).
+#
+# El prefetch puede cruzar al siguiente step: preparar el audio de un checkpoint
+# NO implica que ese checkpoint pueda registrarse. Son conceptos separados.
+# ─────────────────────────────────────────────
+
+def get_upcoming_checkpoints(step: dict, after_order: int, count: int) -> list[dict]:
+    """
+    Devuelve hasta `count` checkpoints posteriores a after_order dentro de step,
+    continuando en los steps siguientes si hace falta. Uso exclusivo: audio.
+    """
+    result: list[dict] = []
+    dispatches = get_dispatches()
+    idx = step_index(dispatches, step)
+    if idx is None:
+        return result
+
+    remaining = sorted(
+        (c for c in step["checkpoints"] if c["order"] > after_order),
+        key=lambda c: c["order"],
+    )
+    result.extend(remaining)
+
+    next_idx = idx + 1
+    while len(result) < count and next_idx < len(dispatches):
+        result.extend(sorted(dispatches[next_idx]["checkpoints"], key=lambda c: c["order"]))
+        next_idx += 1
+
+    return result[:count]
+
+
+def prefetch_upcoming_audio(step: dict, after_order: int, count: int = 2):
+    """
+    Prepara con anticipación el audio de los siguientes `count` checkpoints
+    después de after_order (cruzando de step si hace falta), para que estén
+    listos antes de que el bus llegue físicamente. No bloquea.
+    """
+    for ckpt in get_upcoming_checkpoints(step, after_order, count):
+        audio_announcer.prepare(ckpt["point"]["id"], ckpt["point"]["name"])
+
+
+# ─────────────────────────────────────────────
+# APLICACIÓN DEL CONTEXTO
+# ─────────────────────────────────────────────
+
+def apply_context(context: TemporalContext, monitor_ref: list) -> bool:
+    """
+    Publica el contexto temporal como estado vigente y amplía la ventana de
+    geocercas observadas (anterior + actual + siguiente).
+
+    No decide nada por sí misma: el contexto ya viene resuelto por el reloj.
+    Devuelve True si el contexto cambió respecto del anterior.
     monitor_ref es [monitor] para poder mutar la referencia desde el watcher.
     """
-    global CURRENT_INDEX, CURRENT_STEP, GEOFENCES, DISPATCHED
+    global CURRENT_CONTEXT
 
     with _lock:
-        if step is None:
-            CURRENT_INDEX = None
-            CURRENT_STEP  = None
-            GEOFENCES     = []
-            DISPATCHED    = False
-            log.info("Estado → SIN TURNO ACTIVO")
-            return
+        previous = CURRENT_CONTEXT
+        changed  = previous.key != context.key
+        CURRENT_CONTEXT = context
+        monitor = monitor_ref[0]
 
-        target_index = step_index(step)
-        if target_index is None:
-            log.warning("No se pudo ubicar el step recibido dentro de ALL_DISPATCHES")
-            return
+    # Fuera del lock: tocar el monitor y encolar audio no debe bloquear al hilo GPS.
+    monitor.add_geofences(
+        merge_geofences(context.previous_step, context.current_step, context.next_step)
+    )
 
-        if CURRENT_INDEX is not None and target_index < CURRENT_INDEX:
-            log.debug("Se ignora: el horario sugiere retroceder a un step ya superado")
-            return
+    if not changed:
+        return False
 
-        is_new_step   = target_index != CURRENT_INDEX
-        CURRENT_INDEX = target_index
-        CURRENT_STEP  = step
+    log.info(f"[TEMPORAL] {context.describe()}")
 
-        prev_step, current_step, next_step = get_step_context(CURRENT_INDEX)
-        monitor_ref[0].add_geofences(merge_geofences(prev_step, current_step, next_step))
-        GEOFENCES = monitor_ref[0].geofences
+    # Al entrar en un recorrido nuevo se precarga el audio de sus primeros
+    # checkpoints: todavía no hubo ninguna reproducción que dispare la cadena.
+    entered_new_step = (
+        context.state == ACTIVE_STEP
+        and step_number(previous.current_step) != step_number(context.current_step)
+    )
+    if entered_new_step:
+        prefetch_upcoming_audio(context.current_step, -1, 2)
 
-        active     = is_step_active(step)
-        DISPATCHED = active if is_new_step else (DISPATCHED or active)
-
-        status = "ACTIVO" if DISPATCHED else f"EN ESPERA — inicia a las {step['start_schedule']}"
-        log.info(
-            f"Turno aplicado: {step.get('code', '?')}  "
-            f"{step['start_schedule']} → {step['end_schedule']}  [{status}]"
-        )
-
-    # Fuera del lock: primer(os) checkpoint(s) del step recién aplicado, para
-    # que su audio ya esté listo antes de que el bus llegue (nunca hubo un
-    # playback previo que dispare la cadena de prefetch para estos).
-    if is_new_step:
-        prefetch_upcoming_audio(current_step, -1, 2)
+    return True
 
 
 # ─────────────────────────────────────────────
 # WATCHER THREAD
+#
+# Único responsable de hacer avanzar el contexto temporal. El GPS nunca cambia
+# de step: si el bus está detenido, el contexto igual avanza cuando el reloj
+# alcanza el start_schedule del siguiente recorrido.
 # ─────────────────────────────────────────────
 
 def schedule_watcher(monitor_ref: list, stop_event: threading.Event):
     """
-    Hilo independiente que evalúa periódicamente:
-      - Si el turno actual terminó → busca el siguiente en ALL_DISPATCHES.
-      - Si un turno en espera ya comenzó → activa DISPATCHED.
-      - Si es un nuevo día → recarga todos los despachos desde la API.
+    Hilo independiente que reevalúa periódicamente el contexto temporal:
+      - Si cambió el día → recarga despachos y reinicia el estado.
+      - Si el bus no tenía despachos → reintenta cada NO_DISPATCH_RETRY_SECONDS.
+      - En cualquier otro caso → resuelve el contexto con la hora actual.
     """
-    global DISPATCHED, CURRENT_INDEX
-    last_date = datetime.now().strftime('%Y-%m-%d')
+    last_date  = datetime.now().strftime('%Y-%m-%d')
+    last_retry = 0.0
 
     while not stop_event.is_set():
         time.sleep(WATCHER_INTERVAL_SECONDS)
 
-        current_date = datetime.now().strftime('%Y-%m-%d')
+        now          = datetime.now()
+        current_date = now.strftime('%Y-%m-%d')
 
         # ── Nuevo día: recarga completa ──────────────────────────────────────
         if current_date != last_date:
             log.info(f"[WATCHER] Nuevo día detectado ({current_date}) — recargando despachos")
             last_date = current_date
-            with _lock:
-                CURRENT_INDEX = None
-                REPORTED_CHECKPOINTS.clear()
-            monitor_ref[0]  = GeofenceMonitor([])
-            has_dispatches  = load_all_dispatches()
-            if not has_dispatches:
+            reset_daily_state()
+            monitor_ref[0] = GeofenceMonitor([])
+            if not load_all_dispatches():
                 log.warning("[WATCHER] Bus sin despachos hoy")
-                apply_step(None, monitor_ref)
-            else:
-                apply_step(get_current_step(ALL_DISPATCHES), monitor_ref)
+            apply_context(resolve_temporal_context(get_dispatches(), datetime.now()), monitor_ref)
             continue
 
-        # ── Bus sin trabajo hoy: nada que evaluar ───────────────────────────
-        if not ALL_DISPATCHES:
-            time.sleep(60)
-            log.debug("[WATCHER] Sin despachos — reintentando consulta a la API")
-            has_dispatches = load_all_dispatches()
-            if has_dispatches:
-                log.info("[WATCHER] Nuevos despachos detectados — aplicando step inicial")
-                apply_step(get_current_step(ALL_DISPATCHES), monitor_ref)
+        dispatches = get_dispatches()
+
+        # ── Bus sin despachos: reintento espaciado, sin dormir el hilo ───────
+        if not dispatches:
+            if time.monotonic() - last_retry >= NO_DISPATCH_RETRY_SECONDS:
+                last_retry = time.monotonic()
+                log.debug("[WATCHER] Sin despachos — reintentando consulta a la API")
+                if load_all_dispatches():
+                    log.info("[WATCHER] Despachos disponibles — resolviendo contexto temporal")
+                    apply_context(
+                        resolve_temporal_context(get_dispatches(), datetime.now()), monitor_ref
+                    )
             continue
 
-        new_step = get_current_step(ALL_DISPATCHES)
-
-        with _lock:
-            current    = CURRENT_STEP
-            dispatched = DISPATCHED
-
-        # ── Todos los turnos terminaron ──────────────────────────────────────
-        if new_step is None:
-            if current is not None:
-                log.info("[WATCHER] Todos los turnos del día han finalizado")
-                apply_step(None, monitor_ref)
-            continue
-
-        step_changed = (current is None) or (new_step.get('step') != current.get('step'))
-        active_now   = is_step_active(new_step)
-
-        # ── El step cambió (nuevo turno o primer turno del día) ──────────────
-        if step_changed:
-            log.info(f"[WATCHER] Cambio de step detectado → {new_step.get('code', '?')}")
-            apply_step(new_step, monitor_ref)
-
-        # ── Mismo step: acaba de entrar en horario (EN ESPERA → ACTIVO) ─────
-        elif not dispatched and active_now:
-            with _lock:
-                DISPATCHED = True
-            log.info(f"[WATCHER]  Turno iniciado — {new_step['start_schedule']}")
-
-        # ── Mismo step: acaba de salir del horario (buscar siguiente) ────────
-        elif dispatched and not active_now:
-            log.info(f"[WATCHER] Turno finalizado — {new_step['end_schedule']}")
-            next_step = get_current_step(ALL_DISPATCHES)
-            apply_step(next_step, monitor_ref)
+        # ── Curso normal: el reloj manda ─────────────────────────────────────
+        apply_context(resolve_temporal_context(dispatches, now), monitor_ref)
 
 
 # ─────────────────────────────────────────────
@@ -496,7 +644,7 @@ def fetch_gps() -> Optional[GpsReading]:
 
 
 # ─────────────────────────────────────────────
-# REPORTE DE CHECKPOINT
+# PERSISTENCIA
 # ─────────────────────────────────────────────
 
 def report_checkpoint(checkpoint_id: int, name: str, time_reported: str):
@@ -515,7 +663,7 @@ def report_checkpoint(checkpoint_id: int, name: str, time_reported: str):
 
 
 def report_dispatch_checkpoint(step: int, checkpoint_id: int, time_reported: str):
-    """Actualiza time_reported del checkpoint dentro del despacho activo cacheado localmente."""
+    """Actualiza time_reported del checkpoint dentro del despacho cacheado localmente."""
     try:
         payload = {
             "step": step,
@@ -528,10 +676,6 @@ def report_dispatch_checkpoint(step: int, checkpoint_id: int, time_reported: str
     except requests.RequestException as e:
         log.error(f"No se pudo actualizar el despacho para checkpoint_id={checkpoint_id}: {e}")
 
-
-# ─────────────────────────────────────────────
-# REGISTRO DE EVENTOS
-# ─────────────────────────────────────────────
 
 def log_event(event_type: str, priority: str, message: str, payload: Optional[dict] = None):
     """
@@ -553,122 +697,257 @@ def log_event(event_type: str, priority: str, message: str, payload: Optional[di
         log.error(f"No se pudo registrar el evento '{event_type}': {e}")
 
 
-def _find_unreported_checkpoint(step: Optional[dict], point_id: int) -> Optional[dict]:
+def emit_arrival_event(step: dict, ckpt: dict, time_reported: str, reason: str):
+    """
+    Emite el evento `checkpoint_arrival`: el único canal por el que bus-display
+    se entera de una llegada.
+
+    Se llama SOLO desde resolve_and_report_checkpoint y SOLO después de que el
+    checkpoint fue aceptado y persistido; una geocerca descartada por horario o
+    por secuencia nunca produce evento, y por lo tanto nunca produce popup.
+
+    El payload lleva los datos ya calculados (incluida la diferencia de tiempo)
+    para que la pantalla solo presente: no recalcula puntualidad ni reimplementa
+    ninguna regla de despacho.
+    """
+    scheduled_time = ckpt.get("time_calculated")
+    arrival = calculate_arrival_status(scheduled_time, time_reported)
+
+    status     = arrival["status"] if arrival else None
+    difference = arrival["difference_seconds"] if arrival else None
+    point      = ckpt["point"]
+
+    if arrival:
+        message = (
+            f"Llegada a {point['name']} — {ARRIVAL_LABELS[status]} ({difference:+d} s)"
+        )
+    else:
+        message = f"Llegada a {point['name']} — sin hora programada válida"
+
+    log_event(
+        event_type="checkpoint_arrival",
+        priority="MEDIUM",
+        message=message,
+        payload={
+            "step": step["step"],
+            "checkpoint_id": ckpt["id"],
+            "point_id": point["id"],
+            "point_name": point["name"],
+            "order": ckpt["order"],
+            "scheduled_time": scheduled_time,
+            "reported_time": time_reported,
+            "difference_seconds": difference,
+            "arrival_status": status,
+            "line": step.get("line"),
+            "reason": reason,   # progreso normal / cierre tardío (auditoría)
+        },
+    )
+    log.info(f"[ARRIVAL] {message}")
+
+
+# ─────────────────────────────────────────────
+# ELEGIBILIDAD DE CHECKPOINTS
+#
+# Función pura: recibe el contexto temporal ya resuelto, el punto en el que
+# entró el bus y los checkpoints ya reportados; decide si existe un candidato
+# válido. No hace I/O ni toca estado global.
+# ─────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class CheckpointCandidate:
+    step:       dict
+    checkpoint: dict
+    reason:     str
+
+
+def find_unreported_checkpoint(step: Optional[dict], point_id: int, reported) -> Optional[dict]:
     """Busca, dentro de un step, el checkpoint del punto point_id que aún no fue reportado."""
     if not step:
         return None
     for ckpt in step["checkpoints"]:
-        if ckpt["point"]["id"] == point_id and ckpt["id"] not in REPORTED_CHECKPOINTS:
+        if ckpt["point"]["id"] == point_id and ckpt["id"] not in reported:
             return ckpt
     return None
 
 
-MAX_SKIPPED_CHECKPOINTS = 2   # omisiones toleradas antes de considerar la secuencia inconsistente
+def step_has_point(step: Optional[dict], point_id: int) -> bool:
+    """True si alguna geocerca del step corresponde a ese punto físico."""
+    if not step:
+        return False
+    return any(ckpt["point"]["id"] == point_id for ckpt in step["checkpoints"])
 
 
-def has_consistent_sequence(step: dict, target_ckpt: dict) -> bool:
+def is_last_checkpoint(step: dict, ckpt: dict) -> bool:
+    return ckpt["order"] == max(c["order"] for c in step["checkpoints"])
+
+
+def count_skipped(step: dict, target_ckpt: dict, reported) -> int:
+    """Checkpoints anteriores (order menor) del mismo step que siguen sin reportar."""
+    return sum(
+        1 for c in step["checkpoints"]
+        if c["order"] < target_ckpt["order"] and c["id"] not in reported
+    )
+
+
+def has_consistent_sequence(step: dict, target_ckpt: dict, reported) -> bool:
     """
-    Evalúa si el recorrido ya hecho respalda marcar target_ckpt: cuenta los
-    checkpoints anteriores (order menor) del mismo step que siguen sin reportar.
+    Evalúa si el recorrido ya hecho respalda marcar target_ckpt.
 
     Hasta MAX_SKIPPED_CHECKPOINTS omisiones se consideran inconsistencias
     normales del GPS y no impiden marcar; más que eso indica que el bus no
     venía realmente recorriendo este step y que la entrada a la geocerca es
     un cruce de paso, no una llegada legítima.
     """
-    skipped = [
-        c for c in step["checkpoints"]
-        if c["order"] < target_ckpt["order"] and c["id"] not in REPORTED_CHECKPOINTS
-    ]
-    return len(skipped) <= MAX_SKIPPED_CHECKPOINTS
+    return count_skipped(step, target_ckpt, reported) <= MAX_SKIPPED_CHECKPOINTS
 
 
-def resolve_and_report_checkpoint(monitor: "GeofenceMonitor", point_id: int, name: str, time_reported: str):
+def within_closing_grace(step: dict, now: datetime) -> bool:
+    """Ventana de gracia posterior al end_schedule para el cierre del último recorrido."""
+    end = schedule_seconds(step["end_schedule"])
+    return now_seconds(now) - end <= CLOSING_GRACE_MINUTES * 60
+
+
+def log_not_started(context: TemporalContext, point_id: int):
+    """Deja constancia cuando la geocerca pertenece a un step que aún no empieza."""
+    if step_has_point(context.next_step, point_id):
+        log.info(
+            f"[GEOFENCE] point={point_id} ignorado: pertenece al step "
+            f"{step_number(context.next_step)} pero todavía no inicia "
+            f"({context.next_step['start_schedule']})"
+        )
+
+
+def resolve_late_closing_candidate(
+    context: TemporalContext, point_id: int, reported
+) -> Optional[CheckpointCandidate]:
     """
-    Decide a qué checkpoint corresponde una entrada de geocerca (usando el
-    contexto step anterior/actual/siguiente) y la reporta. Prioridad:
+    Excepción de cierre tardío: el bus puede terminar físicamente el recorrido
+    unos minutos después de que su horario acabó.
 
-      1) Checkpoint intermedio (no el último) del step actual, sin reportar
-         → progreso normal dentro del step.
-      2) Checkpoint sin reportar del step siguiente → avanza de step. Cubre
-         tanto la geocerca compartida entre el último checkpoint pendiente
-         del step actual y el primero del siguiente (gana el avance, el
-         pendiente del step actual queda sin marcar a propósito) como una
-         llegada tardía a la primera geocerca del siguiente step.
-      3) Checkpoint del step actual (incluida su última geocerca cuando NO es
-         compartida con el siguiente) → cierre normal, sin avanzar. Si además
-         estamos en el período de transición (este step ya terminó por horario
-         y el siguiente aún no empieza), el último checkpoint solo se marca si
-         la secuencia recorrida lo respalda: en esa ventana el bus adelantado
-         puede estar re-atravesando la geocerca camino al próximo recorrido.
-      4) Sin candidato sin reportar (incluye coincidir solo con el step
-         anterior, ya superado) → se ignora, no se recupera.
+    SOLO el último checkpoint del step anterior es evaluable, y solo si la
+    secuencia recorrida lo respalda. Un checkpoint intermedio del step anterior
+    nunca se marca fuera de horario.
     """
-    prev_step, current_step, next_step = get_step_context(CURRENT_INDEX)
+    step = context.previous_step
+    if step is None:
+        return None
 
-    current_ckpt = _find_unreported_checkpoint(current_step, point_id)
-    is_last_of_current = (
-        current_ckpt is not None
-        and current_ckpt["order"] == max(c["order"] for c in current_step["checkpoints"])
+    ckpt = find_unreported_checkpoint(step, point_id, reported)
+    if ckpt is None:
+        return None
+
+    if not is_last_checkpoint(step, ckpt):
+        log.info(
+            f"[TRANSITION] checkpoint intermedio rechazado step={step_number(step)} "
+            f"checkpoint={ckpt['id']}: fuera de horario solo se cierra el último punto"
+        )
+        return None
+
+    skipped = count_skipped(step, ckpt, reported)
+    if skipped > MAX_SKIPPED_CHECKPOINTS:
+        log.info(
+            f"[TRANSITION] checkpoint final rechazado step={step_number(step)} "
+            f"checkpoint={ckpt['id']} skipped={skipped}"
+        )
+        return None
+
+    log.info(
+        f"[TRANSITION] checkpoint final aceptado step={step_number(step)} "
+        f"checkpoint={ckpt['id']} skipped={skipped}"
     )
+    return CheckpointCandidate(step=step, checkpoint=ckpt, reason="cierre tardío")
 
-    advance = False
-    if current_ckpt is not None and not is_last_of_current:
-        target_step, target_ckpt = current_step, current_ckpt
-    else:
-        next_ckpt = _find_unreported_checkpoint(next_step, point_id)
-        if next_ckpt is not None:
-            target_step, target_ckpt, advance = next_step, next_ckpt, True
-        elif current_ckpt is not None:
-            # Último checkpoint del step actual. Durante el período de transición
-            # la entrada puede ser un cruce de paso hacia el siguiente recorrido:
-            # se exige que la secuencia ya recorrida lo respalde.
-            if (
-                is_in_transition_period(current_step, next_step)
-                and not has_consistent_sequence(current_step, current_ckpt)
-            ):
-                log.info(
-                    f"[TRIP] Geocerca '{name}' ignorada — último checkpoint "
-                    f"{current_ckpt['id']} del step {current_step['step']} en transición "
-                    f"con secuencia inconsistente (más de {MAX_SKIPPED_CHECKPOINTS} checkpoints previos sin reportar)"
-                )
-                return
-            target_step, target_ckpt = current_step, current_ckpt
-        else:
-            log.debug(f"Geocerca punto={point_id} sin checkpoint pendiente en el contexto actual — se ignora")
-            return
+
+def resolve_checkpoint_candidate(
+    context: TemporalContext, point_id: int, reported, now: datetime
+) -> Optional[CheckpointCandidate]:
+    """
+    Decide qué checkpoint —si alguno— corresponde a la entrada a una geocerca.
+
+        ACTIVE_STEP    → solo checkpoints del step vigente
+        BETWEEN_STEPS  → solo el último checkpoint del step anterior (cierre tardío)
+        AFTER_LAST_STEP→ igual, acotado por CLOSING_GRACE_MINUTES
+        BEFORE_FIRST_STEP → nada
+
+    Nunca se busca en `next_step`: un despacho que no ha comenzado no recibe
+    marcaciones, aunque el bus haya entrado físicamente en su geocerca.
+    """
+    if context.state == ACTIVE_STEP:
+        ckpt = find_unreported_checkpoint(context.current_step, point_id, reported)
+        if ckpt is not None:
+            return CheckpointCandidate(
+                step=context.current_step, checkpoint=ckpt, reason="progreso normal"
+            )
+        log_not_started(context, point_id)
+        return None
+
+    if context.state == BETWEEN_STEPS:
+        # El siguiente step nunca es elegible antes de su start_schedule; el
+        # límite superior de esta ventana es justamente ese horario.
+        log_not_started(context, point_id)
+        return resolve_late_closing_candidate(context, point_id, reported)
+
+    if context.state == AFTER_LAST_STEP:
+        if context.previous_step and not within_closing_grace(context.previous_step, now):
+            return None
+        return resolve_late_closing_candidate(context, point_id, reported)
+
+    return None
+
+
+# ─────────────────────────────────────────────
+# REPORTE DE CHECKPOINT
+# ─────────────────────────────────────────────
+
+def resolve_and_report_checkpoint(point_id: int, name: str, time_reported: str):
+    """
+    Orquesta una entrada de geocerca:
+
+        snapshot coherente → candidato → reserva → persistencia → audio
+
+    No cambia de step: el avance del recorrido lo hace exclusivamente el
+    watcher a partir del reloj.
+    """
+    now = datetime.now()
+
+    # Snapshot coherente del estado compartido; el resto del trabajo (HTTP,
+    # audio) ocurre fuera del lock.
+    with _lock:
+        context  = CURRENT_CONTEXT
+        reported = frozenset(REPORTED_CHECKPOINTS)
+
+    candidate = resolve_checkpoint_candidate(context, point_id, reported, now)
+    if candidate is None:
+        log.debug(
+            f"Geocerca punto={point_id} sin checkpoint autorizado "
+            f"(state={context.state}) — se ignora"
+        )
+        return
+
+    target_step = candidate.step
+    target_ckpt = candidate.checkpoint
+
+    if not reserve_checkpoint(target_ckpt["id"]):
+        log.debug(f"Checkpoint {target_ckpt['id']} ya reportado por otra entrada — se ignora")
+        return
 
     report_checkpoint(target_ckpt["id"], name, time_reported)
     report_dispatch_checkpoint(target_step["step"], target_ckpt["id"], time_reported)
-    REPORTED_CHECKPOINTS.add(target_ckpt["id"])
 
-    log_event(
-        event_type="geofence_entry",
-        priority="HIGH",
-        message=f"Entrada a geocerca '{name}' — checkpoint {target_ckpt['id']} (step {target_step['step']})",
-        payload={
-            "geofence_id": point_id,
-            "geofence_name": name,
-            "step": target_step["step"],
-            "checkpoint_id": target_ckpt["id"],
-            "time_reported": time_reported,
-        },
+    log.info(
+        f"[TRIP] Checkpoint {target_ckpt['id']} marcado en step "
+        f"{step_number(target_step)} ({candidate.reason}) @ {time_reported}"
     )
 
-    if advance:
-        log.info(f"[TRIP] Avance de step por geocerca → {target_step.get('code', '?')} (step {target_step['step']})")
-        apply_step(target_step, [monitor])
+    emit_arrival_event(target_step, target_ckpt, time_reported, candidate.reason)
 
     # Anuncio de voz: prioridad más baja, nunca bloquea el hilo de GPS (solo
     # encola). Reproduce lo que ya estaba prefetch-eado; al terminar, prepara
     # los próximos 2 checkpoints del recorrido.
-    next_ckpts = get_upcoming_checkpoints(target_step, target_ckpt["order"], 1)
-    next_name = next_ckpts[0]["point"]["name"] if next_ckpts else None
     audio_announcer.announce(
-        target_ckpt["id"],
+        target_ckpt["point"]["id"],
         target_ckpt["point"]["name"],
-        next_name,
-        on_done=lambda _cid: prefetch_upcoming_audio(target_step, target_ckpt["order"], 2),
+        on_done=lambda _pid: prefetch_upcoming_audio(target_step, target_ckpt["order"], 2),
     )
 
 
@@ -712,7 +991,14 @@ class GeofenceEvent:
 
 
 class GeofenceMonitor:
+    """
+    Detecta entradas y salidas de geocercas. Solo sabe de geometría: qué
+    checkpoint corresponde a una entrada —y si puede registrarse— lo decide
+    resolve_and_report_checkpoint con el contexto temporal.
+    """
+
     def __init__(self, geofences: list[dict]):
+        self._mutex = threading.Lock()   # el watcher agrega geocercas mientras el hilo GPS itera
         self.geofences = list(geofences)
         self._active: dict[int, Optional[GeofenceEvent]] = {
             g["id"]: None for g in geofences
@@ -721,15 +1007,20 @@ class GeofenceMonitor:
 
     def add_geofences(self, geofences: list[dict]):
         """Agrega geocercas nuevas sin tocar el estado (_active/history) de las existentes."""
-        for geo in geofences:
-            gid = geo["id"]
-            if gid not in self._active:
-                self._active[gid] = None
-                self.geofences.append(geo)
+        with self._mutex:
+            for geo in geofences:
+                gid = geo["id"]
+                if gid not in self._active:
+                    self._active[gid] = None
+                    self.geofences.append(geo)
 
     def process(self, reading: GpsReading):
         now = datetime.now()
-        for geo in self.geofences:
+
+        with self._mutex:
+            geofences = list(self.geofences)   # snapshot: el watcher puede estar agregando
+
+        for geo in geofences:
             gid    = geo["id"]
             inside = is_inside(reading, geo)
             active = self._active[gid]
@@ -741,7 +1032,7 @@ class GeofenceMonitor:
 
                 time_reported = now.strftime('%H:%M:%S')
                 log.info(f" ENTRADA  [{gid}] {geo['name']}  @ {time_reported}")
-                resolve_and_report_checkpoint(self, gid, geo["name"], time_reported)
+                resolve_and_report_checkpoint(gid, geo["name"], time_reported)
 
             elif not inside and active is not None:
                 self._active[gid] = None
@@ -771,28 +1062,25 @@ def main():
     # 1. Carga todos los despachos del día
     has_dispatches = load_all_dispatches()
 
-    # 2. Determina el step inicial y arranca el monitor
-    initial_step = get_current_step(ALL_DISPATCHES) if has_dispatches else None
-    monitor_ref  = [GeofenceMonitor([])]
-    apply_step(initial_step, monitor_ref)
+    # 2. Resuelve el contexto temporal con la hora actual. Un reinicio a media
+    #    jornada retoma el recorrido que corresponde a esa hora, nunca el primero.
+    monitor_ref = [GeofenceMonitor([])]
+    context = resolve_temporal_context(get_dispatches(), datetime.now())
+    apply_context(context, monitor_ref)
 
     # 3. Cabecera informativa
     log.info(f"Bus               : {BUS_REGISTER}")
 
     if not has_dispatches:
         log.warning("Estado            : SIN DESPACHOS HOY (reserva o mantenimiento)")
-    elif CURRENT_STEP:
-        status = "ACTIVO" if DISPATCHED else f"EN ESPERA — inicia a las {CURRENT_STEP['start_schedule']}"
-        log.info(f"Turno actual      : {CURRENT_STEP['start_schedule']} → {CURRENT_STEP['end_schedule']}")
-        log.info(f"Estado            : {status}")
-        log.info(f"Geocercas cargadas: {len(GEOFENCES)}")
-        log.info(f"Despachos hoy     : {len(ALL_DISPATCHES)}")
     else:
-        log.info("Estado            : Todos los turnos del día han finalizado")
+        log.info(f"Estado            : {context.describe()}")
+        log.info(f"Geocercas cargadas: {len(monitor_ref[0].geofences)}")
+        log.info(f"Despachos hoy     : {len(get_dispatches())}")
 
     log.info(f"Polling GPS       : cada {POLL_INTERVAL_SECONDS}s")
     log.info(f"Watcher           : cada {WATCHER_INTERVAL_SECONDS}s")
-    log.info(f"Log archivo       : simtra_{datetime.now().strftime('%Y-%m-%d')}.log")
+    log.info(f"Log archivo       : bus_monitor.log")
     log.info("=" * 65)
 
     # 4. Inicia el watcher en hilo demonio
@@ -807,17 +1095,13 @@ def main():
     log.debug("Watcher thread iniciado")
 
     # 5. Loop principal de tracking
-    # Se monitorea el GPS mientras exista un step vigente (activo o en espera),
-    # sin importar el horario — una llegada anticipada o tardía nunca debe
-    # ignorarse solo por estar fuera de la ventana de schedule (Regla 5).
+    # Se monitorea el GPS siempre que haya despachos cargados: la detección de
+    # geocercas es física y continua. Qué puede registrarse lo decide el
+    # contexto temporal en cada entrada, no este loop.
     try:
         while True:
-            with _lock:
-                current_step = CURRENT_STEP
-                monitor      = monitor_ref[0]
-
-            if current_step is None:
-                time.sleep(0.5)
+            if not get_dispatches():
+                time.sleep(1)
                 continue
 
             reading = fetch_gps()
@@ -826,7 +1110,7 @@ def main():
                 time.sleep(POLL_INTERVAL_SECONDS)
                 continue
 
-            monitor.process(reading)
+            monitor_ref[0].process(reading)
             time.sleep(POLL_INTERVAL_SECONDS)
 
     except KeyboardInterrupt:

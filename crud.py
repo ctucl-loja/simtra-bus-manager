@@ -183,8 +183,16 @@ def get_events(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     limit: int = 100,
+    after_id: Optional[int] = None,
 ):
-    """Eventos más recientes primero. Los filtros son opcionales (listos para usarse a futuro)."""
+    """
+    Eventos más recientes primero. Los filtros son opcionales.
+
+    Con `after_id` el endpoint se vuelve incremental: devuelve solo los eventos
+    posteriores a ese id y en orden ASCENDENTE, para que un consumidor que hace
+    polling (bus-display) los procese en el mismo orden en que ocurrieron. Sin
+    `after_id` se conserva el comportamiento histórico (más recientes primero).
+    """
     query = db.query(Event)
     if priority:
         query = query.filter(Event.priority == priority)
@@ -194,6 +202,10 @@ def get_events(
         query = query.filter(Event.created_at >= start_date)
     if end_date:
         query = query.filter(Event.created_at <= end_date)
+
+    if after_id is not None:
+        return query.filter(Event.id > after_id).order_by(Event.id.asc()).limit(limit).all()
+
     return query.order_by(Event.created_at.desc()).limit(limit).all()
 
 

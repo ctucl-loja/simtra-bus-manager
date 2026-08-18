@@ -1,19 +1,43 @@
 from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import Optional
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from dotenv import load_dotenv
+import os
 import models
 from database import engine, SessionLocal
 from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate, EventCreate, EventResponse, VehicleCreate, VehicleResponse
 import crud
 from datetime import datetime
 
+load_dotenv()
+
 ECUADOR_TZ = ZoneInfo("America/Guayaquil")
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Origenes permitidos para la pantalla del bus (bus-display), que corre en el
+# mismo dispositivo pero en otro puerto -> es cross-origin para el navegador.
+# Se configura con FAST_API_CORS_ORIGINS (lista separada por comas); "*" abre
+# a cualquier origen, aceptable porque el equipo esta aislado en el bus.
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("FAST_API_CORS_ORIGINS", "*").split(",")
+    if origin.strip()
+]
+
 models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="SIMTRA TRACKING API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=False,   # la API local no usa cookies ni auth
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def get_db():
@@ -109,9 +133,16 @@ def read_events(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     limit: int = 100,
+    after_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
-    return crud.get_events(db, priority, event_type, start_date, end_date, limit)
+    """
+    Canal local de eventos entre los procesos de la RPi.
+
+    Con `after_id` la respuesta es incremental (solo eventos con id mayor) y
+    ordenada de forma ascendente; sin él se mantiene el comportamiento actual.
+    """
+    return crud.get_events(db, priority, event_type, start_date, end_date, limit, after_id)
 
 
 #endpoints vehicle
