@@ -7,11 +7,14 @@ from datetime import datetime, timezone
 from datetime import datetime,time
 
 from zoneinfo import ZoneInfo
+import logging
+
+log = logging.getLogger("simtra")
 
 ECUADOR_TZ = ZoneInfo("America/Guayaquil")
 
 def create_gps_data(db: Session, data: GPSDataCreate):
-    gps = Gps(**data.dict())
+    gps = Gps(**data.model_dump())
     db.add(gps)
     db.commit()
     db.refresh(gps)
@@ -64,7 +67,18 @@ def upload_pending_checkpoints(db: Session, id: int):
     return checkpoint
 
 def create_passenger(db: Session, data: PassengerCreate) -> Passenger:
-    gps = db.query(Gps).order_by(Gps.timestamp.desc()).first()
+    # Misma regla de "última posición" que get_last_position, para que un
+    # pasajero y el mapa no se refieran a lecturas distintas.
+    gps = db.query(Gps).order_by(Gps.created_at.desc()).first()
+
+    if gps is None:
+        # Se registra igual: perder el conteo de pasajeros sería peor que
+        # guardarlo sin ubicación. Pero queda dicho en el log, porque (0, 0) es
+        # una coordenada real y no debe confundirse con una posición medida.
+        log.warning(
+            "[PASSENGER] Todavía no hay ninguna lectura GPS: el pasajero se "
+            "guarda con coordenadas (0, 0), que NO son una posición real"
+        )
 
     passenger = Passenger(
         timestamp=datetime.now(ECUADOR_TZ),
@@ -89,21 +103,20 @@ def get_passengers_today(db: Session):
     Retorna todos los pasajeros de hoy y el total.
     (La RPi ya está configurada con hora Ecuador)
     """
-    today = datetime.now().date()
-    
+    # Hora de Ecuador explícita, igual que create_passenger: si el equipo se
+    # configurara en otra zona, "hoy" seguiría significando lo mismo en ambos.
+    today = datetime.now(ECUADOR_TZ).date()
+
     start_of_day = datetime.combine(today, time.min)
     end_of_day = datetime.combine(today, time.max)
-    
-    query = db.query(Passenger).filter(
+
+    passengers = db.query(Passenger).filter(
         Passenger.timestamp >= start_of_day,
         Passenger.timestamp <= end_of_day
-    ).order_by(Passenger.timestamp.desc())  # ← Más recientes primero
-    
-    passengers = query.all()
-    total = query.count()
-    
+    ).order_by(Passenger.timestamp.desc()).all()   # ← Más recientes primero
+
     return {
-        "total": total,
+        "total": len(passengers),   # ya está la lista: un COUNT extra sobra
         "passengers": passengers
     }
 
@@ -149,13 +162,36 @@ def update_dispatch_checkpoint(db: Session, step: int, checkpoint_id: int, time_
     if not dispatch:
         return None
 
+    if not isinstance(dispatch.data, list):
+        log.error(
+            f"[DISPATCH] El despacho cacheado no es una lista "
+            f"({type(dispatch.data).__name__}) — no se actualiza"
+        )
+        return None
+
+    updated = False
     for s in dispatch.data:
-        if s.get("step") == step:
-            for ckpt in s.get("checkpoints", []):
-                if ckpt.get("id") == checkpoint_id:
-                    ckpt["time_reported"] = time_reported
-                    break
+        if not isinstance(s, dict) or s.get("step") != step:
+            continue
+        checkpoints = s.get("checkpoints")
+        if not isinstance(checkpoints, list):
             break
+        for ckpt in checkpoints:
+            if isinstance(ckpt, dict) and ckpt.get("id") == checkpoint_id:
+                ckpt["time_reported"] = time_reported
+                updated = True
+                break
+        break
+
+    if not updated:
+        # None => el llamador sabe que la marcación NO quedó reflejada. Antes se
+        # devolvía el despacho igual, así que un checkpoint inexistente parecía
+        # una actualización exitosa.
+        log.warning(
+            f"[DISPATCH] step={step} checkpoint_id={checkpoint_id} no existe en el "
+            f"despacho cacheado — no se actualiza nada"
+        )
+        return None
 
     flag_modified(dispatch, "data")
     db.commit()

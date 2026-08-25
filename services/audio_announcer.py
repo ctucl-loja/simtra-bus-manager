@@ -60,6 +60,22 @@ def build_message(name: str) -> str:
     return f"Punto de control {name}."
 
 
+def _valid_request(point_id, name) -> Optional[tuple]:
+    """
+    Normaliza (point_id, name) o devuelve None.
+
+    Se valida al ENCOLAR y no en el worker: así el error aparece en el log junto
+    a la llegada que lo originó, y no como un fallo suelto de un hilo de audio.
+    """
+    if isinstance(point_id, bool) or not isinstance(point_id, int):
+        log.error(f"[AUDIO] point_id inválido ({point_id!r}) — no se encola")
+        return None
+    if not isinstance(name, str) or not name.strip():
+        log.error(f"[AUDIO] Nombre de punto inválido para point={point_id} ({name!r}) — no se encola")
+        return None
+    return point_id, name.strip()
+
+
 def _paths_for(point_id: int) -> tuple[Path, Path]:
     """Rutas absolutas del mp3 y su metadata para un punto físico."""
     mp3_path = AUDIO_DIR / f"point_{point_id}.mp3"
@@ -247,7 +263,10 @@ threading.Thread(target=_player_worker, daemon=True, name="audio-player").start(
 
 def prepare(point_id: int, name: str):
     """Encola la generación (con cache) del audio de un punto. No bloquea."""
-    _generate_queue.put((point_id, name))
+    request = _valid_request(point_id, name)
+    if request is None:
+        return
+    _generate_queue.put(request)
 
 
 def announce(
@@ -260,5 +279,11 @@ def announce(
     Si el audio no estaba prefetch-eado, se genera dentro del hilo reproductor
     (nunca en el hilo de GPS). on_done(point_id) se invoca al terminar, desde
     el hilo reproductor.
+
+    Una llegada sin punto identificable no se anuncia, pero eso NO invalida la
+    marcación: el audio es la prioridad más baja de la cadena.
     """
-    _play_queue.put((point_id, name, on_done))
+    request = _valid_request(point_id, name)
+    if request is None:
+        return
+    _play_queue.put((*request, on_done))

@@ -9,8 +9,9 @@ from dotenv import load_dotenv
 import os
 import models
 from database import engine, SessionLocal
-from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate, EventCreate, EventResponse, VehicleCreate, VehicleResponse
+from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate, EventCreate, EventResponse, VehicleCreate, VehicleResponse, NetworkInfoResponse
 import crud
+from services import network_info
 from datetime import datetime
 
 load_dotenv()
@@ -154,6 +155,26 @@ def save_vehicle(data: VehicleCreate, db: Session = Depends(get_db)):
 @app.get("/api/vehicle", response_model=Optional[VehicleResponse])
 def read_vehicle(db: Session = Depends(get_db)):
     return crud.get_last_vehicle(db)
+
+
+#endpoints sistema
+
+@app.get("/api/system/network", response_model=NetworkInfoResponse)
+def read_network_info():
+    """
+    Informacion de red de ESTE dispositivo (la Raspberry), para la vista /info
+    de bus-display: el navegador no puede consultar el SSID ni las interfaces
+    del sistema por su cuenta.
+
+    Estrictamente de solo lectura e informativa. Expone unicamente tipo de
+    conexion, interfaz, SSID y direcciones IPv4 — nunca credenciales, MAC,
+    gateway, DNS ni rutas. No existe ninguna operacion que modifique la red.
+
+    Nunca responde 500: si la informacion no se puede obtener (herramienta
+    ausente, timeout, salida invalida, sistema no Linux) devuelve
+    status="unavailable" con la lista vacia.
+    """
+    return network_info.get_network_info()
 
 
 #herramienta de prueba: inyector manual de GPS

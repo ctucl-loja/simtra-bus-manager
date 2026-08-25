@@ -1,6 +1,5 @@
 from sqlalchemy import Column, Integer, Float, DateTime,String,Boolean,JSON
 from datetime import datetime, timezone
-from datetime import datetime
 from database import Base
 
 class Gps(Base):

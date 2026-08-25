@@ -80,6 +80,26 @@ Documentación interactiva disponible en: `http://192.168.1.14:8000/docs`
 
 ---
 
+## Tests
+
+Suite de `unittest` (biblioteca estandar, sin dependencias nuevas) sobre la
+logica critica: parsing de horarios, contexto temporal, lecturas GPS, ciclo de
+vida de las marcaciones, cliente HTTP remoto y deteccion de red.
+
+```bash
+python3 -m unittest discover -s tests -t tests
+```
+
+No requiere variables de entorno ni red: `tests/_bootstrap.py` sustituye
+`python-dotenv` y `gTTS` por stubs cuando no estan instalados, y tanto el
+cliente remoto como la deteccion de red se ejercitan con salidas simuladas —
+ningun test depende de las interfaces reales de la maquina.
+
+`main.py`, `crud.py` y `schemas.py` no tienen tests: necesitan fastapi,
+sqlalchemy y pydantic instalados, asi que se validan ejecutando el servicio.
+
+---
+
 ## Eventos locales (`/api/events`)
 
 `/api/events` es el **canal local de eventos entre los procesos instalados en la
@@ -96,9 +116,27 @@ tanto no genera aviso en la pantalla del conductor.
 
 ```text
 GPS → geocerca → validación temporal → validación de secuencia
-    → checkpoint aceptado → report_checkpoint + report_dispatch_checkpoint
-    → checkpoint_arrival
+    → RESERVA → report_checkpoint (indispensable) → CONFIRMACIÓN
+    → report_dispatch_checkpoint (secundaria) → checkpoint_arrival → audio
 ```
+
+**El evento solo existe si la marcación se persistió.** El ciclo de vida de un
+checkpoint tiene tres estados distintos:
+
+| Estado | Significado | Elegible |
+|---|---|---|
+| Reservado | un hilo se lo adjudicó y está persistiendo | no |
+| Confirmado | `report_checkpoint` respondió OK | no, cerrado por el día |
+| Liberado | la persistencia falló; la reserva se deshizo | sí, en la próxima entrada |
+
+`report_checkpoint` es la escritura **indispensable**: alimenta la cola que
+`data_loader` sube al backend. Si falla, se libera la reserva y no hay evento ni
+audio — un fallo transitorio no puede costar la marcación del día ni anunciar al
+conductor una llegada que no se guardó.
+
+`report_dispatch_checkpoint` es **secundaria**: actualiza el despacho cacheado
+que ve la pantalla. Si falla, la marcación ya está a salvo, así que se registra
+el error y se continúa; revertir la confirmación arriesgaría un doble reporte.
 
 | Campo | Valor |
 |---|---|
@@ -162,6 +200,74 @@ primero), igual que el resto de filtros (`priority`, `event_type`, `start_date`,
 
 No existe marca de "leído" en la base: el consumidor recuerda localmente el
 último id que procesó y los eventos nunca se modifican después de emitirse.
+
+---
+
+## Informacion de red (`/api/system/network`)
+
+Endpoint local, de **solo lectura**, que describe a que red esta conectada ESTA
+Raspberry. Existe porque el navegador no puede consultar el SSID ni las
+interfaces del sistema: lo consume la vista `/info` de `bus-display`.
+
+Cuando la pantalla se abre desde una laptop, la respuesta sigue describiendo la
+Raspberry — es la maquina donde corre este servicio.
+
+### Contrato
+
+```json
+{
+  "status": "connected",
+  "connections": [
+    { "type": "wifi",     "interface": "wlan0", "name": "Nombre de la red", "ipv4": ["192.168.1.50"] },
+    { "type": "ethernet", "interface": "eth0",  "name": null,               "ipv4": ["192.168.1.51"] }
+  ]
+}
+```
+
+| Campo | Valores |
+|---|---|
+| `status` | `connected` (al menos una conexion activa con IPv4) · `disconnected` (se consulto y no hay ninguna) · `unavailable` (no se pudo obtener la informacion) |
+| `type` | `wifi` · `ethernet` · `other` |
+| `interface` | nombre de interfaz, o `null` |
+| `name` | SSID; **solo** en Wi-Fi. En cable siempre `null` |
+| `ipv4` | lista de direcciones IPv4 validas (puede tener mas de una) |
+
+Si Wi-Fi y Ethernet estan activas a la vez, se devuelven las dos.
+
+### Como se detecta
+
+| Dato | Fuente | Respaldo |
+|---|---|---|
+| Interfaces y direcciones | `ip -j address` (una sola llamada) | — |
+| Tipo de conexion | `nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device` | `/sys/class/net/<iface>/wireless`, luego `link_type` |
+| SSID | campo CONNECTION de `nmcli` | `iwgetid <iface> -r` |
+
+**Nunca se decide por el nombre de la interfaz.** En equipos con nombres
+predecibles (`eno2`, `wlo1`, `enp3s0`) esa heuristica falla, asi que se usan el
+tipo que reporta NetworkManager y el flag inalambrico del kernel.
+
+Se excluyen loopback, `127.0.0.0/8`, interfaces caidas y direcciones no validas.
+Una interfaz activa **sin IPv4 no se reporta**: sin direccion no hay nada que
+mostrar y anunciarla como conexion seria enganoso.
+
+### Tolerancia a fallos
+
+El endpoint **nunca responde 500**. Ante herramienta ausente, salida vacia, JSON
+invalido, timeout, sistema que no sea Linux o permisos insuficientes devuelve
+una respuesta estable con `unavailable` (o `disconnected` si se pudo consultar y
+no hay conexiones). Todos los comandos se ejecutan con lista de argumentos,
+`shell=False` y timeout corto; ninguna entrada del usuario participa en su
+construccion.
+
+La respuesta se cachea 15 s para no ejecutar comandos del sistema en cada
+peticion. El lock del cache **no** se mantiene durante los subprocess.
+
+### Que NO expone
+
+Ni contrasenas de Wi-Fi, ni claves, ni JWT, ni archivos de configuracion, ni
+rutas, ni DNS, ni gateway, ni MAC, ni nada del router Teltonika ni de otras
+maquinas. Tampoco existe ninguna operacion de escritura: no conecta, desconecta
+ni modifica interfaces ni servicios.
 
 ---
 

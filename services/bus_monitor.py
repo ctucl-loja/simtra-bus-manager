@@ -55,13 +55,38 @@ log = setup_logger()
 # ─────────────────────────────────────────────
 
 load_dotenv()
-POLL_INTERVAL_SECONDS = int(os.getenv("FAST_API_POLL_INTERVAL_SECONDS"))
-WATCHER_INTERVAL_SECONDS = int(os.getenv("FAST_API_WATCHER_INTERVAL_SECONDS"))  # cada 10s el watcher evalúa si el turno cambió
-LOCAL_BACKEND = os.getenv("FAST_API_LOCAL_BACKEND")
+
+
+def int_env(name: str, default: int) -> int:
+    """
+    Entero de una variable de entorno, tolerante a ausencia y a basura.
+
+    Antes se hacía int(os.getenv(...)) directo: una variable ausente lanzaba
+    TypeError y el servicio no arrancaba. En un bus es peor no arrancar que
+    arrancar con el valor por defecto dejándolo dicho en el log.
+    """
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        log.warning(f"[CONFIG] {name} ausente — se usa {default}")
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        log.warning(f"[CONFIG] {name}={raw!r} no es un entero — se usa {default}")
+        return default
+    if value <= 0:
+        log.warning(f"[CONFIG] {name}={value} no es positivo — se usa {default}")
+        return default
+    return value
+
+
+POLL_INTERVAL_SECONDS = int_env("FAST_API_POLL_INTERVAL_SECONDS", 2)
+WATCHER_INTERVAL_SECONDS = int_env("FAST_API_WATCHER_INTERVAL_SECONDS", 10)  # el watcher evalúa si el turno cambió
+LOCAL_BACKEND = os.getenv("FAST_API_LOCAL_BACKEND") or "http://127.0.0.1:8000"
 BACKEND_URL = os.getenv("FAST_API_BACKEND_URL")
 BACKEND_USERNAME = os.getenv("FAST_API_BACKEND_USERNAME")
 BACKEND_PASSWORD = os.getenv("FAST_API_BACKEND_PASSWORD")
-BUS_REGISTER = int(os.getenv("FAST_API_BUS_REGISTER", 0))
+BUS_REGISTER = int_env("FAST_API_BUS_REGISTER", 0)
 
 # Reintento de consulta de despachos cuando el bus arranca sin ninguno (reserva,
 # mantenimiento o backend caído). El watcher no duerme este tiempo: solo evita
@@ -110,13 +135,57 @@ AFTER_LAST_STEP   = "AFTER_LAST_STEP"     # todos los recorridos del día termin
 
 
 def step_number(step: Optional[dict]) -> Optional[int]:
-    return step.get("step") if step else None
+    return step.get("step") if isinstance(step, dict) else None
 
 
 def schedule_seconds(value: str) -> int:
-    """'HH:MM:SS' → segundos desde medianoche."""
+    """
+    'HH:MM:SS' → segundos desde medianoche.
+
+    Estricta a propósito: valida también el rango, para que un horario imposible
+    ('25:00:00') no genere una ventana temporal capaz de autorizar marcaciones.
+    Lanza ante cualquier entrada inválida; quien no pueda permitirse la excepción
+    usa safe_schedule_seconds.
+    """
     hours, minutes, seconds = (int(part) for part in value.split(":"))
+    if not (0 <= hours < 24 and 0 <= minutes < 60 and 0 <= seconds < 60):
+        raise ValueError(f"horario fuera de rango: {value!r}")
     return hours * 3600 + minutes * 60 + seconds
+
+
+def safe_schedule_seconds(value) -> Optional[int]:
+    """
+    schedule_seconds que devuelve None en vez de lanzar. None NO es 0: un
+    horario ilegible no es medianoche, y confundirlos abriría ventanas de step
+    que no existen.
+    """
+    try:
+        return schedule_seconds(value)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def as_finite_float(value) -> Optional[float]:
+    """
+    float utilizable, o None. Descarta NaN e infinitos: en geometría envenenan
+    toda comparación (NaN <= radio siempre es False) sin lanzar ningún error,
+    así que un GPS corrupto apagaría el geofencing en silencio.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def as_int(value) -> Optional[int]:
+    """int utilizable, o None. Los bool se rechazan: True no es un id."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def now_seconds(now: datetime) -> int:
@@ -154,7 +223,7 @@ def calculate_arrival_status(scheduled_time: str, reported_time: str) -> Optiona
     """
     try:
         difference = schedule_seconds(reported_time) - schedule_seconds(scheduled_time)
-    except (AttributeError, ValueError):
+    except (AttributeError, TypeError, ValueError):
         log.warning(
             f"[ARRIVAL] Horas no parseables: programada={scheduled_time!r} "
             f"reportada={reported_time!r}"
@@ -205,25 +274,70 @@ class TemporalContext:
 
     def describe(self) -> str:
         if self.state == ACTIVE_STEP:
-            step = self.current_step
+            step = self.current_step or {}
             return (
-                f"state={ACTIVE_STEP} step={step['step']} "
-                f"horario={step['start_schedule']}→{step['end_schedule']}"
+                f"state={ACTIVE_STEP} step={step.get('step')} "
+                f"horario={step.get('start_schedule')}→{step.get('end_schedule')}"
             )
         if self.state == BETWEEN_STEPS:
             return (
                 f"state={BETWEEN_STEPS} previous={step_number(self.previous_step)} "
                 f"next={step_number(self.next_step)} "
-                f"(inicia {self.next_step['start_schedule']})"
+                f"(inicia {(self.next_step or {}).get('start_schedule')})"
             )
         if self.state == BEFORE_FIRST_STEP:
             if self.next_step is None:
                 return f"state={BEFORE_FIRST_STEP} (sin despachos)"
             return (
                 f"state={BEFORE_FIRST_STEP} next={step_number(self.next_step)} "
-                f"(inicia {self.next_step['start_schedule']})"
+                f"(inicia {self.next_step.get('start_schedule')})"
             )
         return f"state={AFTER_LAST_STEP} previous={step_number(self.previous_step)}"
+
+
+def usable_steps(dispatches) -> list[tuple]:
+    """
+    Steps que pueden definir una ventana temporal, como (step, inicio, fin) en
+    segundos.
+
+    Un step con horario ausente o ilegible se descarta con log en vez de tumbar
+    el contexto entero: el resto de la jornada sigue siendo válida. Descartar es
+    la opción segura — un step sin ventana confiable no debe autorizar marcajes.
+    """
+    if not isinstance(dispatches, list):
+        log.error(
+            f"[TEMPORAL] Despachos con forma inesperada ({type(dispatches).__name__}) — se ignoran"
+        )
+        return []
+
+    usable = []
+    for step in dispatches:
+        if not isinstance(step, dict):
+            log.warning(f"[TEMPORAL] Step con forma inesperada ({type(step).__name__}) — se ignora")
+            continue
+
+        start = safe_schedule_seconds(step.get("start_schedule"))
+        end = safe_schedule_seconds(step.get("end_schedule"))
+        if start is None or end is None:
+            log.warning(
+                f"[TEMPORAL] Step {step.get('step')} con horario inválido "
+                f"(start={step.get('start_schedule')!r} end={step.get('end_schedule')!r}) — se ignora"
+            )
+            continue
+        if end < start:
+            # Un recorrido que cruza medianoche caería aquí. No se soporta hoy
+            # (ver README): en vez de inventar una ventana que abarque dos días
+            # —y con ella marcaciones fuera de hora— se descarta y se avisa.
+            log.warning(
+                f"[TEMPORAL] Step {step.get('step')} termina antes de empezar "
+                f"({step.get('start_schedule')} → {step.get('end_schedule')}); "
+                f"los recorridos que cruzan medianoche no están soportados — se ignora"
+            )
+            continue
+
+        usable.append((step, start, end))
+
+    return usable
 
 
 def resolve_temporal_context(dispatches: list[dict], now: datetime) -> TemporalContext:
@@ -236,15 +350,19 @@ def resolve_temporal_context(dispatches: list[dict], now: datetime) -> TemporalC
     Sin despachos devuelve BEFORE_FIRST_STEP sin steps: un estado sin
     `current_step` ni `previous_step` no puede autorizar ninguna escritura.
     """
-    if not dispatches:
+    scheduled = usable_steps(dispatches)
+    if not scheduled:
         return TemporalContext(state=BEFORE_FIRST_STEP)
 
-    steps = sorted(dispatches, key=lambda s: schedule_seconds(s["start_schedule"]))
+    # (step, inicio, fin) ya parseados y ordenados: se parsea una sola vez y
+    # ningún horario ilegible llega hasta aquí.
+    scheduled.sort(key=lambda item: item[1])
+    steps = [item[0] for item in scheduled]
     current_sec = now_seconds(now)
 
     active_indexes = [
-        i for i, step in enumerate(steps)
-        if schedule_seconds(step["start_schedule"]) <= current_sec <= schedule_seconds(step["end_schedule"])
+        i for i, (_, start, end) in enumerate(scheduled)
+        if start <= current_sec <= end
     ]
 
     if active_indexes:
@@ -259,11 +377,11 @@ def resolve_temporal_context(dispatches: list[dict], now: datetime) -> TemporalC
             next_step=steps[index + 1] if index + 1 < len(steps) else None,
         )
 
-    if current_sec < schedule_seconds(steps[0]["start_schedule"]):
+    if current_sec < scheduled[0][1]:
         return TemporalContext(state=BEFORE_FIRST_STEP, next_step=steps[0])
 
-    finished = [s for s in steps if schedule_seconds(s["end_schedule"]) < current_sec]
-    upcoming = [s for s in steps if schedule_seconds(s["start_schedule"]) > current_sec]
+    finished = [step for step, _, end in scheduled if end < current_sec]
+    upcoming = [step for step, start, _ in scheduled if start > current_sec]
 
     if not upcoming:
         return TemporalContext(
@@ -289,7 +407,20 @@ _lock = threading.Lock()
 
 ALL_DISPATCHES:  list[dict]      = []                                   # todos los despachos del día
 CURRENT_CONTEXT: TemporalContext = TemporalContext(state=BEFORE_FIRST_STEP)
-REPORTED_CHECKPOINTS: set[int]   = set()                                # ids de checkpoint ya reportados hoy
+
+# Ciclo de vida de una marcación. Los dos conjuntos son deliberadamente
+# distintos: confundirlos era lo que permitía perder marcaciones.
+#
+#   libre        → no está en ninguno de los dos: elegible
+#   RESERVADO    → IN_FLIGHT_CHECKPOINTS: un hilo se lo adjudicó y está
+#                  persistiendo; nadie más puede tomarlo, pero TODAVÍA no está
+#                  garantizado
+#   CONFIRMADO   → CONFIRMED_CHECKPOINTS: la escritura indispensable terminó
+#                  bien; cerrado por el resto del día
+#   fallido      → se quita de IN_FLIGHT y vuelve a estar libre, para que una
+#                  próxima entrada a la geocerca pueda reintentarlo
+CONFIRMED_CHECKPOINTS: set[int] = set()   # persistidos: no se vuelven a reportar
+IN_FLIGHT_CHECKPOINTS: set[int] = set()   # reservados, persistencia en curso
 
 
 def get_dispatches() -> list[dict]:
@@ -306,22 +437,50 @@ def get_context() -> TemporalContext:
         return CURRENT_CONTEXT
 
 
-def get_reported_snapshot() -> frozenset:
+def taken_checkpoints() -> frozenset:
+    """
+    Checkpoints no elegibles ahora mismo: confirmados + reservados.
+
+    La selección debe mirar los DOS conjuntos. Si solo mirara los confirmados,
+    dos entradas concurrentes elegirían el mismo checkpoint y la segunda
+    fracasaría recién en reserve_checkpoint.
+    """
     with _lock:
-        return frozenset(REPORTED_CHECKPOINTS)
+        return frozenset(CONFIRMED_CHECKPOINTS | IN_FLIGHT_CHECKPOINTS)
 
 
 def reserve_checkpoint(checkpoint_id: int) -> bool:
     """
-    Test-and-set atómico: devuelve True si este hilo se quedó con el derecho de
-    reportar el checkpoint. Se reserva ANTES de la persistencia para que dos
-    entradas de geocerca casi simultáneas no lo reporten dos veces.
+    Test-and-set atómico: True si este hilo se quedó con el derecho de reportar
+    el checkpoint. Se reserva ANTES de persistir para que dos entradas de
+    geocerca casi simultáneas no lo reporten dos veces.
+
+    Reservar NO es confirmar: si la persistencia falla hay que llamar a
+    release_checkpoint, o el checkpoint quedaría bloqueado todo el día sin
+    haberse guardado nunca.
     """
     with _lock:
-        if checkpoint_id in REPORTED_CHECKPOINTS:
+        if checkpoint_id in CONFIRMED_CHECKPOINTS or checkpoint_id in IN_FLIGHT_CHECKPOINTS:
             return False
-        REPORTED_CHECKPOINTS.add(checkpoint_id)
+        IN_FLIGHT_CHECKPOINTS.add(checkpoint_id)
         return True
+
+
+def confirm_checkpoint(checkpoint_id: int):
+    """La escritura indispensable terminó bien: el checkpoint queda cerrado."""
+    with _lock:
+        IN_FLIGHT_CHECKPOINTS.discard(checkpoint_id)
+        CONFIRMED_CHECKPOINTS.add(checkpoint_id)
+
+
+def release_checkpoint(checkpoint_id: int):
+    """
+    La persistencia falló: vuelve a estar libre para la próxima entrada a la
+    geocerca. Un fallo transitorio (FastAPI reiniciándose, disco ocupado) no
+    debe costar la marcación del día.
+    """
+    with _lock:
+        IN_FLIGHT_CHECKPOINTS.discard(checkpoint_id)
 
 
 def reset_daily_state():
@@ -330,7 +489,8 @@ def reset_daily_state():
     with _lock:
         ALL_DISPATCHES  = []
         CURRENT_CONTEXT = TemporalContext(state=BEFORE_FIRST_STEP)
-        REPORTED_CHECKPOINTS.clear()
+        CONFIRMED_CHECKPOINTS.clear()
+        IN_FLIGHT_CHECKPOINTS.clear()
 
 
 # ─────────────────────────────────────────────
@@ -350,21 +510,42 @@ def load_all_dispatches(date: Optional[str] = None) -> bool:
 
     try:
         dispatches = simtra.get_dispatch(BUS_REGISTER, query_date)
-        if not dispatches:
-            with _lock:
-                ALL_DISPATCHES = []
-            log.warning("La API no devolvió despachos para hoy")
-            return False
-        with _lock:
-            ALL_DISPATCHES = dispatches
-        log.info(f"Despachos cargados: {len(dispatches)} turno(s)")
-        seed_reported_checkpoints(dispatches)
-        cache_dispatch_locally(dispatches, query_date)
-        sync_vehicle_info()
-        return True
     except Exception as e:
-        log.error(f"Error consultando despachos: {e}")
+        # Barrera: el cliente ya no debería lanzar, pero esto corre en el hilo
+        # watcher y una excepción aquí lo mataría para el resto del día.
+        log.exception(f"Error consultando despachos: {e}")
         return False
+
+    if not isinstance(dispatches, list):
+        log.error(f"Despachos con forma inesperada ({type(dispatches).__name__}) — se ignoran")
+        dispatches = []
+
+    # Solo cuentan los steps con horario utilizable: uno sin ventana temporal no
+    # puede autorizar marcaciones, así que tampoco debe hacer creer que el bus
+    # tiene trabajo hoy.
+    if not usable_steps(dispatches):
+        with _lock:
+            ALL_DISPATCHES = []
+        log.warning("La API no devolvió despachos utilizables para hoy")
+        return False
+
+    with _lock:
+        ALL_DISPATCHES = dispatches
+    log.info(f"Despachos cargados: {len(dispatches)} turno(s)")
+
+    # Cada paso se aísla: que falle el cache local o el vehículo no debe anular
+    # unos despachos que ya están cargados en memoria y son válidos.
+    for label, action in (
+        ("seed de checkpoints", lambda: seed_reported_checkpoints(dispatches)),
+        ("cache local del despacho", lambda: cache_dispatch_locally(dispatches, query_date)),
+        ("sincronización del vehículo", sync_vehicle_info),
+    ):
+        try:
+            action()
+        except Exception as e:
+            log.exception(f"Fallo en {label}: {e}")
+
+    return True
 
 
 def sync_vehicle_info():
@@ -374,8 +555,8 @@ def sync_vehicle_info():
     local, igual que se hace con el despacho.
     """
     vehicle = simtra.get_vehicle(BUS_REGISTER)
-    if not vehicle:
-        log.warning("La API no devolvió información del vehículo")
+    if not isinstance(vehicle, dict) or not vehicle:
+        log.warning("La API no devolvió información utilizable del vehículo")
         return
     cache_vehicle_locally(vehicle)
 
@@ -419,11 +600,20 @@ def seed_reported_checkpoints(dispatches: list[dict]):
     ya trae con time_reported distinto de '00:00:00'. Evita reportarlos de nuevo
     si el proceso se reinicia a mitad del día.
     """
+    seeded = []
+    for step in dispatches if isinstance(dispatches, list) else []:
+        for ckpt in step_checkpoints(step):
+            reported = ckpt.get("time_reported") or "00:00:00"
+            if reported == "00:00:00":
+                continue
+            cid = checkpoint_id(ckpt)
+            if cid is None:
+                log.warning(f"[SEED] Checkpoint sin id utilizable en step {step_number(step)} — se ignora")
+                continue
+            seeded.append(cid)
+
     with _lock:
-        for step in dispatches:
-            for ckpt in step["checkpoints"]:
-                if ckpt.get("time_reported", "00:00:00") != "00:00:00":
-                    REPORTED_CHECKPOINTS.add(ckpt["id"])
+        CONFIRMED_CHECKPOINTS.update(seeded)
 
 
 # ─────────────────────────────────────────────
@@ -434,10 +624,95 @@ def seed_reported_checkpoints(dispatches: list[dict]):
 # GeofenceMonitor no significa que su checkpoint pueda registrarse.
 # ─────────────────────────────────────────────
 
+def step_checkpoints(step) -> list[dict]:
+    """
+    Checkpoints utilizables de un step. Silenciosa a propósito: se invoca en
+    rutas calientes (cada lectura GPS) y no puede convertirse en un generador
+    de logs.
+    """
+    if not isinstance(step, dict):
+        return []
+    checkpoints = step.get("checkpoints")
+    if not isinstance(checkpoints, list):
+        return []
+    return [c for c in checkpoints if isinstance(c, dict)]
+
+
+def checkpoint_id(ckpt) -> Optional[int]:
+    """Id de la marcación. Sin él no se puede reservar ni sincronizar: es
+    indispensable, así que None significa 'checkpoint inutilizable'."""
+    return as_int(ckpt.get("id")) if isinstance(ckpt, dict) else None
+
+
+def checkpoint_order(ckpt) -> Optional[int]:
+    return as_int(ckpt.get("order")) if isinstance(ckpt, dict) else None
+
+
+def checkpoint_point(ckpt) -> dict:
+    point = ckpt.get("point") if isinstance(ckpt, dict) else None
+    return point if isinstance(point, dict) else {}
+
+
+def checkpoint_point_id(ckpt) -> Optional[int]:
+    return as_int(checkpoint_point(ckpt).get("id"))
+
+
+def point_name(ckpt) -> str:
+    """Nombre presentable del punto. Nunca vacío: se usa en logs y en el evento."""
+    name = checkpoint_point(ckpt).get("name")
+    if isinstance(name, str) and name.strip():
+        return name
+    pid = checkpoint_point_id(ckpt)
+    return f"PUNTO {pid}" if pid is not None else "PUNTO DESCONOCIDO"
+
+
+# Puntos ya reportados como inválidos: merge_geofences corre en cada tick del
+# watcher, así que sin esto un solo punto corrupto llenaría el log del día.
+_warned_invalid_points: set = set()
+
+
+def geofence_from_point(point) -> Optional[dict]:
+    """
+    Geocerca normalizada a partir de un punto del despacho, o None si le falta
+    algo indispensable para la geometría.
+
+    Devuelve una COPIA validada: de aquí en adelante el monitor solo trabaja con
+    números finitos, así que is_inside no puede comparar contra basura. Un radio
+    nulo o negativo se rechaza — no se inventa un radio por defecto, porque eso
+    produciría marcaciones en lugares donde no hay geocerca.
+    """
+    if not isinstance(point, dict):
+        return None
+
+    pid = as_int(point.get("id"))
+    latitude = as_finite_float(point.get("latitude"))
+    longitude = as_finite_float(point.get("longitude"))
+    radius = as_finite_float(point.get("radius"))
+
+    if pid is None or latitude is None or longitude is None or radius is None or radius <= 0:
+        return None
+    if not (-90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0):
+        return None
+
+    name = point.get("name")
+    return {
+        "id": pid,
+        "name": str(name) if isinstance(name, str) and name.strip() else f"PUNTO {pid}",
+        "latitude": latitude,
+        "longitude": longitude,
+        "radius": radius,
+    }
+
+
 def step_index(dispatches: list[dict], step: dict) -> Optional[int]:
     """Ubica la posición de un step dentro de la lista según su número de step."""
+    if not isinstance(dispatches, list) or not isinstance(step, dict):
+        return None
+    target = step.get("step")
+    if target is None:
+        return None
     for i, s in enumerate(dispatches):
-        if s.get("step") == step.get("step"):
+        if isinstance(s, dict) and s.get("step") == target:
             return i
     return None
 
@@ -454,9 +729,18 @@ def merge_geofences(*steps: Optional[dict]) -> list[dict]:
     for step in steps:
         if not step:
             continue
-        for ckpt in step["checkpoints"]:
-            point = ckpt["point"]
-            merged.setdefault(point["id"], point)
+        for ckpt in step_checkpoints(step):
+            geofence = geofence_from_point(ckpt.get("point"))
+            if geofence is None:
+                signature = (step_number(step), str(ckpt.get("id")))
+                if signature not in _warned_invalid_points:
+                    _warned_invalid_points.add(signature)
+                    log.warning(
+                        f"[GEOFENCE] Punto inutilizable en step {step_number(step)} "
+                        f"checkpoint {ckpt.get('id')} ({ckpt.get('point')!r}) — no se vigila"
+                    )
+                continue
+            merged.setdefault(geofence["id"], geofence)
     return list(merged.values())
 
 
@@ -487,15 +771,22 @@ def get_upcoming_checkpoints(step: dict, after_order: int, count: int) -> list[d
     if idx is None:
         return result
 
-    remaining = sorted(
-        (c for c in step["checkpoints"] if c["order"] > after_order),
-        key=lambda c: c["order"],
-    )
-    result.extend(remaining)
+    def ordered(candidate_step, minimum: Optional[int] = None) -> list[dict]:
+        """Checkpoints con order utilizable, ordenados. Los que no lo tienen no
+        pueden ubicarse en el recorrido, así que no se pre-cargan."""
+        usable = []
+        for ckpt in step_checkpoints(candidate_step):
+            order = checkpoint_order(ckpt)
+            if order is None or (minimum is not None and order <= minimum):
+                continue
+            usable.append((order, ckpt))
+        return [ckpt for _, ckpt in sorted(usable, key=lambda pair: pair[0])]
+
+    result.extend(ordered(step, after_order))
 
     next_idx = idx + 1
     while len(result) < count and next_idx < len(dispatches):
-        result.extend(sorted(dispatches[next_idx]["checkpoints"], key=lambda c: c["order"]))
+        result.extend(ordered(dispatches[next_idx]))
         next_idx += 1
 
     return result[:count]
@@ -508,7 +799,10 @@ def prefetch_upcoming_audio(step: dict, after_order: int, count: int = 2):
     listos antes de que el bus llegue físicamente. No bloquea.
     """
     for ckpt in get_upcoming_checkpoints(step, after_order, count):
-        audio_announcer.prepare(ckpt["point"]["id"], ckpt["point"]["name"])
+        pid = checkpoint_point_id(ckpt)
+        if pid is None:
+            continue   # sin id de punto no hay identidad de cache posible
+        audio_announcer.prepare(pid, point_name(ckpt))
 
 
 # ─────────────────────────────────────────────
@@ -575,36 +869,43 @@ def schedule_watcher(monitor_ref: list, stop_event: threading.Event):
     while not stop_event.is_set():
         time.sleep(WATCHER_INTERVAL_SECONDS)
 
-        now          = datetime.now()
-        current_date = now.strftime('%Y-%m-%d')
+        # Barrera de seguridad: este hilo es el único que hace avanzar el
+        # contexto temporal. Si muere, el bus se queda congelado en el step de
+        # la hora en que falló, así que ningún dato defectuoso puede tumbarlo.
+        try:
+            now          = datetime.now()
+            current_date = now.strftime('%Y-%m-%d')
 
-        # ── Nuevo día: recarga completa ──────────────────────────────────────
-        if current_date != last_date:
-            log.info(f"[WATCHER] Nuevo día detectado ({current_date}) — recargando despachos")
-            last_date = current_date
-            reset_daily_state()
-            monitor_ref[0] = GeofenceMonitor([])
-            if not load_all_dispatches():
-                log.warning("[WATCHER] Bus sin despachos hoy")
-            apply_context(resolve_temporal_context(get_dispatches(), datetime.now()), monitor_ref)
-            continue
+            # ── Nuevo día: recarga completa ──────────────────────────────────
+            if current_date != last_date:
+                log.info(f"[WATCHER] Nuevo día detectado ({current_date}) — recargando despachos")
+                last_date = current_date
+                reset_daily_state()
+                monitor_ref[0] = GeofenceMonitor([])
+                if not load_all_dispatches():
+                    log.warning("[WATCHER] Bus sin despachos hoy")
+                apply_context(resolve_temporal_context(get_dispatches(), datetime.now()), monitor_ref)
+                continue
 
-        dispatches = get_dispatches()
+            dispatches = get_dispatches()
 
-        # ── Bus sin despachos: reintento espaciado, sin dormir el hilo ───────
-        if not dispatches:
-            if time.monotonic() - last_retry >= NO_DISPATCH_RETRY_SECONDS:
-                last_retry = time.monotonic()
-                log.debug("[WATCHER] Sin despachos — reintentando consulta a la API")
-                if load_all_dispatches():
-                    log.info("[WATCHER] Despachos disponibles — resolviendo contexto temporal")
-                    apply_context(
-                        resolve_temporal_context(get_dispatches(), datetime.now()), monitor_ref
-                    )
-            continue
+            # ── Bus sin despachos: reintento espaciado, sin dormir el hilo ───
+            if not dispatches:
+                if time.monotonic() - last_retry >= NO_DISPATCH_RETRY_SECONDS:
+                    last_retry = time.monotonic()
+                    log.debug("[WATCHER] Sin despachos — reintentando consulta a la API")
+                    if load_all_dispatches():
+                        log.info("[WATCHER] Despachos disponibles — resolviendo contexto temporal")
+                        apply_context(
+                            resolve_temporal_context(get_dispatches(), datetime.now()), monitor_ref
+                        )
+                continue
 
-        # ── Curso normal: el reloj manda ─────────────────────────────────────
-        apply_context(resolve_temporal_context(dispatches, now), monitor_ref)
+            # ── Curso normal: el reloj manda ─────────────────────────────────
+            apply_context(resolve_temporal_context(dispatches, now), monitor_ref)
+
+        except Exception as e:
+            log.exception(f"[WATCHER] Error inesperado, se reintenta en el próximo ciclo: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -616,7 +917,7 @@ class GpsReading:
     latitude:  float
     longitude: float
     timestamp: str
-    speed:     float
+    speed:     Optional[float]   # el receptor puede no reportar velocidad
 
 
 def fetch_gps() -> Optional[GpsReading]:
@@ -624,64 +925,123 @@ def fetch_gps() -> Optional[GpsReading]:
     try:
         resp = requests.get(f"{LOCAL_BACKEND}/api/gps/last_position", timeout=5)
         resp.raise_for_status()
-        data = resp.json()
-
-        if not data:
-            return None
-
-        return GpsReading(
-            latitude=float(data["latitude"]),
-            longitude=float(data["longitude"]),
-            timestamp=str(data["timestamp"]),
-            speed=float(data["speed"]),
-        )
     except requests.RequestException as e:
         log.error(f"Error consultando GPS: {e}")
         return None
-    except (KeyError, ValueError) as e:
-        log.error(f"Respuesta inesperada de la API GPS: {e}")
+
+    try:
+        data = resp.json()
+    except ValueError:
+        log.error("Respuesta de la API GPS no es JSON válido")
         return None
+
+    if not data:
+        return None   # todavía no hay ninguna posición registrada
+    if not isinstance(data, dict):
+        log.error(f"Respuesta de la API GPS con forma inesperada ({type(data).__name__})")
+        return None
+
+    latitude  = as_finite_float(data.get("latitude"))
+    longitude = as_finite_float(data.get("longitude"))
+
+    # Sin coordenadas utilizables no hay geofencing posible. Se descarta la
+    # lectura entera: inventar un 0.0 pondría el bus en el golfo de Guinea.
+    if latitude is None or longitude is None:
+        log.error(
+            f"Lectura GPS sin coordenadas utilizables "
+            f"(lat={data.get('latitude')!r} lon={data.get('longitude')!r}) — se descarta"
+        )
+        return None
+
+    return GpsReading(
+        latitude=latitude,
+        longitude=longitude,
+        timestamp=str(data.get("timestamp") or ""),
+        # speed es informativa y puede venir nula: no se descarta la lectura por
+        # ella, pero tampoco se convierte en 0.0, que significaría "detenido".
+        speed=as_finite_float(data.get("speed")),
+    )
 
 
 # ─────────────────────────────────────────────
 # PERSISTENCIA
 # ─────────────────────────────────────────────
 
-def report_checkpoint(checkpoint_id: int, name: str, time_reported: str):
-    """Envía el evento de llegada a un checkpoint a la API local."""
+def report_checkpoint(ckpt_id: int, name: str, time_reported: str) -> bool:
+    """
+    Persiste la marcación en la API local (la cola que data_loader sube al
+    backend remoto).
+
+    ESCRITURA INDISPENSABLE: si falla, la llegada no quedó registrada en ningún
+    lado y no puede darse por buena. Devuelve True solo si la API la confirmó.
+    """
     try:
         payload = {
-            "checkpoint_id": checkpoint_id,
+            "checkpoint_id": ckpt_id,
             "name": name,
             "timestamp": time_reported,
         }
         resp = requests.post(f"{LOCAL_BACKEND}/api/checkpoint", json=payload, timeout=5)
         resp.raise_for_status()
-        log.debug(f"Checkpoint reportado OK: id={checkpoint_id} name={name}")
     except requests.RequestException as e:
-        log.error(f"No se pudo guardar checkpoint '{name}': {e}")
+        log.error(
+            f"[PERSIST] No se pudo guardar checkpoint id={ckpt_id} '{name}' @ {time_reported}: {e}"
+        )
+        return False
+
+    log.debug(f"[PERSIST] Checkpoint guardado: id={ckpt_id} name={name}")
+    return True
 
 
-def report_dispatch_checkpoint(step: int, checkpoint_id: int, time_reported: str):
-    """Actualiza time_reported del checkpoint dentro del despacho cacheado localmente."""
+def report_dispatch_checkpoint(step: int, ckpt_id: int, time_reported: str) -> bool:
+    """
+    Actualiza time_reported dentro del despacho cacheado localmente: es lo que
+    ve la pantalla del conductor.
+
+    Escritura SECUNDARIA — su fallo degrada la visualización pero no pierde la
+    marcación, que ya está en la cola de subida. Devuelve True si se confirmó.
+    """
     try:
         payload = {
             "step": step,
-            "checkpoint_id": checkpoint_id,
+            "checkpoint_id": ckpt_id,
             "time_reported": time_reported,
         }
         resp = requests.patch(f"{LOCAL_BACKEND}/api/dispatch/checkpoint", json=payload, timeout=5)
         resp.raise_for_status()
-        log.debug(f"Despacho actualizado OK: step={step} checkpoint_id={checkpoint_id}")
     except requests.RequestException as e:
-        log.error(f"No se pudo actualizar el despacho para checkpoint_id={checkpoint_id}: {e}")
+        log.error(
+            f"[PERSIST] No se pudo actualizar el despacho local "
+            f"(step={step} checkpoint_id={ckpt_id} @ {time_reported}): {e}"
+        )
+        return False
+
+    # La API responde 200 con `null` cuando el checkpoint no existe en el
+    # despacho cacheado. Sin esta comprobación, un no-op se leía como éxito.
+    try:
+        body = resp.json()
+    except ValueError:
+        log.error(f"[PERSIST] Respuesta no JSON al actualizar el despacho (checkpoint_id={ckpt_id})")
+        return False
+
+    if body is None:
+        log.error(
+            f"[PERSIST] El despacho cacheado no contiene step={step} "
+            f"checkpoint_id={ckpt_id} — la pantalla no reflejará esta llegada"
+        )
+        return False
+
+    log.debug(f"[PERSIST] Despacho actualizado: step={step} checkpoint_id={ckpt_id}")
+    return True
 
 
-def log_event(event_type: str, priority: str, message: str, payload: Optional[dict] = None):
+def log_event(event_type: str, priority: str, message: str, payload: Optional[dict] = None) -> bool:
     """
     Registra un evento genérico en la API local (tabla `events`). Reutilizable
     para cualquier tipo de evento futuro: basta con llamar a esta función con
     un event_type/priority/payload distintos, sin tocar la capa de transporte.
+
+    Devuelve True si el evento quedó registrado.
     """
     try:
         body = {
@@ -692,12 +1052,15 @@ def log_event(event_type: str, priority: str, message: str, payload: Optional[di
         }
         resp = requests.post(f"{LOCAL_BACKEND}/api/events", json=body, timeout=5)
         resp.raise_for_status()
-        log.debug(f"Evento registrado OK: {event_type}")
     except requests.RequestException as e:
-        log.error(f"No se pudo registrar el evento '{event_type}': {e}")
+        log.error(f"[EVENT] No se pudo registrar '{event_type}' ({message}): {e}")
+        return False
+
+    log.debug(f"[EVENT] Registrado: {event_type}")
+    return True
 
 
-def emit_arrival_event(step: dict, ckpt: dict, time_reported: str, reason: str):
+def emit_arrival_event(step: dict, ckpt: dict, time_reported: str, reason: str) -> bool:
     """
     Emite el evento `checkpoint_arrival`: el único canal por el que bus-display
     se entera de una llegada.
@@ -715,34 +1078,45 @@ def emit_arrival_event(step: dict, ckpt: dict, time_reported: str, reason: str):
 
     status     = arrival["status"] if arrival else None
     difference = arrival["difference_seconds"] if arrival else None
-    point      = ckpt["point"]
+    name       = point_name(ckpt)
+    # `line` viaja tal cual al frontend; si no es un objeto se envía null en vez
+    # de una forma inesperada que la pantalla tendría que adivinar.
+    line       = step.get("line") if isinstance(step.get("line"), dict) else None
 
     if arrival:
         message = (
-            f"Llegada a {point['name']} — {ARRIVAL_LABELS[status]} ({difference:+d} s)"
+            f"Llegada a {name} — {ARRIVAL_LABELS[status]} ({difference:+d} s)"
         )
     else:
-        message = f"Llegada a {point['name']} — sin hora programada válida"
+        message = f"Llegada a {name} — sin hora programada válida"
 
-    log_event(
+    registered = log_event(
         event_type="checkpoint_arrival",
         priority="MEDIUM",
         message=message,
         payload={
-            "step": step["step"],
-            "checkpoint_id": ckpt["id"],
-            "point_id": point["id"],
-            "point_name": point["name"],
-            "order": ckpt["order"],
+            "step": step_number(step),
+            "checkpoint_id": checkpoint_id(ckpt),
+            "point_id": checkpoint_point_id(ckpt),
+            "point_name": name,
+            "order": checkpoint_order(ckpt),
             "scheduled_time": scheduled_time,
             "reported_time": time_reported,
             "difference_seconds": difference,
             "arrival_status": status,
-            "line": step.get("line"),
+            "line": line,
             "reason": reason,   # progreso normal / cierre tardío (auditoría)
         },
     )
-    log.info(f"[ARRIVAL] {message}")
+
+    if registered:
+        log.info(f"[ARRIVAL] {message}")
+    else:
+        # La marcación SÍ está persistida; lo que falló es el aviso a la
+        # pantalla. Se deja constancia para que no parezca una llegada perdida.
+        log.error(f"[ARRIVAL] Llegada confirmada pero sin evento para la pantalla: {message}")
+
+    return registered
 
 
 # ─────────────────────────────────────────────
@@ -762,31 +1136,41 @@ class CheckpointCandidate:
 
 def find_unreported_checkpoint(step: Optional[dict], point_id: int, reported) -> Optional[dict]:
     """Busca, dentro de un step, el checkpoint del punto point_id que aún no fue reportado."""
-    if not step:
-        return None
-    for ckpt in step["checkpoints"]:
-        if ckpt["point"]["id"] == point_id and ckpt["id"] not in reported:
+    for ckpt in step_checkpoints(step):
+        cid = checkpoint_id(ckpt)
+        if cid is None:
+            continue   # sin id no se puede reservar ni sincronizar: se ignora
+        if checkpoint_point_id(ckpt) == point_id and cid not in reported:
             return ckpt
     return None
 
 
 def step_has_point(step: Optional[dict], point_id: int) -> bool:
     """True si alguna geocerca del step corresponde a ese punto físico."""
-    if not step:
-        return False
-    return any(ckpt["point"]["id"] == point_id for ckpt in step["checkpoints"])
+    return any(checkpoint_point_id(ckpt) == point_id for ckpt in step_checkpoints(step))
 
 
 def is_last_checkpoint(step: dict, ckpt: dict) -> bool:
-    return ckpt["order"] == max(c["order"] for c in step["checkpoints"])
+    orders = [o for o in (checkpoint_order(c) for c in step_checkpoints(step)) if o is not None]
+    order = checkpoint_order(ckpt)
+    return bool(orders) and order is not None and order == max(orders)
 
 
 def count_skipped(step: dict, target_ckpt: dict, reported) -> int:
     """Checkpoints anteriores (order menor) del mismo step que siguen sin reportar."""
-    return sum(
-        1 for c in step["checkpoints"]
-        if c["order"] < target_ckpt["order"] and c["id"] not in reported
-    )
+    target_order = checkpoint_order(target_ckpt)
+    if target_order is None:
+        return 0
+
+    skipped = 0
+    for c in step_checkpoints(step):
+        order = checkpoint_order(c)
+        cid = checkpoint_id(c)
+        if order is None or cid is None:
+            continue
+        if order < target_order and cid not in reported:
+            skipped += 1
+    return skipped
 
 
 def has_consistent_sequence(step: dict, target_ckpt: dict, reported) -> bool:
@@ -802,8 +1186,17 @@ def has_consistent_sequence(step: dict, target_ckpt: dict, reported) -> bool:
 
 
 def within_closing_grace(step: dict, now: datetime) -> bool:
-    """Ventana de gracia posterior al end_schedule para el cierre del último recorrido."""
-    end = schedule_seconds(step["end_schedule"])
+    """
+    Ventana de gracia posterior al end_schedule para el cierre del último
+    recorrido. Con un horario ilegible se responde False: sin fin conocido no
+    hay ventana que respetar, y negarla es lo seguro.
+    """
+    end = safe_schedule_seconds((step or {}).get("end_schedule"))
+    if end is None:
+        log.warning(
+            f"[TRANSITION] Step {step_number(step)} sin end_schedule utilizable — sin ventana de cierre"
+        )
+        return False
     return now_seconds(now) - end <= CLOSING_GRACE_MINUTES * 60
 
 
@@ -813,7 +1206,7 @@ def log_not_started(context: TemporalContext, point_id: int):
         log.info(
             f"[GEOFENCE] point={point_id} ignorado: pertenece al step "
             f"{step_number(context.next_step)} pero todavía no inicia "
-            f"({context.next_step['start_schedule']})"
+            f"({(context.next_step or {}).get('start_schedule')})"
         )
 
 
@@ -903,7 +1296,18 @@ def resolve_and_report_checkpoint(point_id: int, name: str, time_reported: str):
     """
     Orquesta una entrada de geocerca:
 
-        snapshot coherente → candidato → reserva → persistencia → audio
+        snapshot → candidato → RESERVA → escritura indispensable
+                 → CONFIRMACIÓN → despacho (secundaria) → evento → audio
+
+    Invariantes que sostiene esta función:
+
+      1. No se emite `checkpoint_arrival` si la escritura indispensable falló.
+      2. Un fallo transitorio LIBERA la reserva: el checkpoint vuelve a ser
+         elegible en la próxima entrada en vez de quedar bloqueado todo el día.
+      3. La reserva es un test-and-set atómico, así que dos entradas
+         concurrentes no pueden reportar el mismo checkpoint.
+      4. El audio solo anuncia una llegada ya confirmada.
+      5. El lock nunca se mantiene durante HTTP ni audio.
 
     No cambia de step: el avance del recorrido lo hace exclusivamente el
     watcher a partir del reloj.
@@ -913,10 +1317,10 @@ def resolve_and_report_checkpoint(point_id: int, name: str, time_reported: str):
     # Snapshot coherente del estado compartido; el resto del trabajo (HTTP,
     # audio) ocurre fuera del lock.
     with _lock:
-        context  = CURRENT_CONTEXT
-        reported = frozenset(REPORTED_CHECKPOINTS)
+        context = CURRENT_CONTEXT
+        taken   = frozenset(CONFIRMED_CHECKPOINTS | IN_FLIGHT_CHECKPOINTS)
 
-    candidate = resolve_checkpoint_candidate(context, point_id, reported, now)
+    candidate = resolve_checkpoint_candidate(context, point_id, taken, now)
     if candidate is None:
         log.debug(
             f"Geocerca punto={point_id} sin checkpoint autorizado "
@@ -926,28 +1330,67 @@ def resolve_and_report_checkpoint(point_id: int, name: str, time_reported: str):
 
     target_step = candidate.step
     target_ckpt = candidate.checkpoint
+    ckpt_id     = checkpoint_id(target_ckpt)
 
-    if not reserve_checkpoint(target_ckpt["id"]):
-        log.debug(f"Checkpoint {target_ckpt['id']} ya reportado por otra entrada — se ignora")
+    if ckpt_id is None:
+        log.error(
+            f"[TRIP] Candidato sin id utilizable (step={step_number(target_step)} "
+            f"punto={point_id}) — no se puede reservar ni sincronizar, se ignora"
+        )
         return
 
-    report_checkpoint(target_ckpt["id"], name, time_reported)
-    report_dispatch_checkpoint(target_step["step"], target_ckpt["id"], time_reported)
+    # ── RESERVA ───────────────────────────────────────────────────────────
+    if not reserve_checkpoint(ckpt_id):
+        log.debug(f"Checkpoint {ckpt_id} ya reservado o confirmado por otra entrada — se ignora")
+        return
+
+    # ── ESCRITURA INDISPENSABLE ───────────────────────────────────────────
+    # Es la que convierte la llegada en un dato real (y la que data_loader sube
+    # al backend). Si falla, nada de lo que sigue debe ocurrir.
+    if not report_checkpoint(ckpt_id, name, time_reported):
+        release_checkpoint(ckpt_id)
+        log.error(
+            f"[TRIP] Marcación NO registrada: checkpoint {ckpt_id} "
+            f"(step={step_number(target_step)} punto={point_id} '{name}' @ {time_reported}) "
+            f"— reserva liberada, se reintentará en la próxima entrada a la geocerca"
+        )
+        return
+
+    # ── CONFIRMACIÓN ──────────────────────────────────────────────────────
+    confirm_checkpoint(ckpt_id)
 
     log.info(
-        f"[TRIP] Checkpoint {target_ckpt['id']} marcado en step "
+        f"[TRIP] Checkpoint {ckpt_id} marcado en step "
         f"{step_number(target_step)} ({candidate.reason}) @ {time_reported}"
     )
 
+    # ── ESCRITURA SECUNDARIA ──────────────────────────────────────────────
+    # Actualiza el despacho que ve la pantalla. Su fallo NO revierte la
+    # confirmación: la marcación ya está a salvo, y liberar la reserva aquí
+    # arriesgaría un segundo reporte de la misma llegada.
+    step_no = as_int(step_number(target_step))
+    if step_no is None:
+        log.error(
+            f"[TRIP] Step sin número utilizable: no se actualiza el despacho local "
+            f"del checkpoint {ckpt_id}"
+        )
+    elif not report_dispatch_checkpoint(step_no, ckpt_id, time_reported):
+        log.error(
+            f"[TRIP] Checkpoint {ckpt_id} guardado, pero el despacho local no se "
+            f"actualizó: la pantalla seguirá mostrando 'Sin reportar' hasta la próxima recarga"
+        )
+
     emit_arrival_event(target_step, target_ckpt, time_reported, candidate.reason)
 
-    # Anuncio de voz: prioridad más baja, nunca bloquea el hilo de GPS (solo
-    # encola). Reproduce lo que ya estaba prefetch-eado; al terminar, prepara
-    # los próximos 2 checkpoints del recorrido.
+    # Anuncio de voz sobre una llegada ya confirmada: prioridad más baja, nunca
+    # bloquea el hilo de GPS (solo encola). Al terminar prepara los próximos 2.
+    announce_order = checkpoint_order(target_ckpt)
     audio_announcer.announce(
-        target_ckpt["point"]["id"],
-        target_ckpt["point"]["name"],
-        on_done=lambda _pid: prefetch_upcoming_audio(target_step, target_ckpt["order"], 2),
+        checkpoint_point_id(target_ckpt),
+        point_name(target_ckpt),
+        on_done=lambda _pid: prefetch_upcoming_audio(
+            target_step, announce_order if announce_order is not None else -1, 2
+        ),
     )
 
 
@@ -1023,7 +1466,7 @@ class GeofenceMonitor:
         for geo in geofences:
             gid    = geo["id"]
             inside = is_inside(reading, geo)
-            active = self._active[gid]
+            active = self._active.get(gid)
 
             if inside and active is None:
                 event = GeofenceEvent(geofence_id=gid, geofence_name=geo["name"], entry_time=now)
@@ -1100,17 +1543,28 @@ def main():
     # contexto temporal en cada entrada, no este loop.
     try:
         while True:
-            if not get_dispatches():
-                time.sleep(1)
-                continue
+            # Barrera de seguridad del loop de tracking: una lectura corrupta o
+            # un despacho con una forma inesperada no pueden dejar al bus sin
+            # geofencing el resto del día. Antes, un speed nulo bastaba para
+            # matar el proceso.
+            try:
+                if not get_dispatches():
+                    time.sleep(1)
+                    continue
 
-            reading = fetch_gps()
+                reading = fetch_gps()
 
-            if reading is None:
-                time.sleep(POLL_INTERVAL_SECONDS)
-                continue
+                if reading is None:
+                    time.sleep(POLL_INTERVAL_SECONDS)
+                    continue
 
-            monitor_ref[0].process(reading)
+                monitor_ref[0].process(reading)
+
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                log.exception(f"[LOOP] Error procesando la lectura GPS: {e}")
+
             time.sleep(POLL_INTERVAL_SECONDS)
 
     except KeyboardInterrupt:
