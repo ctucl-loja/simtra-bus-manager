@@ -32,15 +32,15 @@ def update_gps_position(coordenadas: str):
         resp = requests.post(GPS_API_URL, json=gps_body_data, timeout=5)
         resp.raise_for_status()
         
-        print(f"✅ [EXITO] Enviado: {latitud}, {longitud} a {random_speed} km/h")
+        print(f"[EXITO] Enviado: {latitud}, {longitud} a {random_speed} km/h")
         return resp.json()
 
     except requests.RequestException as e:
-        print(f"❌ [ERROR GPS] No se pudo conectar: {e}")
+        print(f"[ERROR GPS] No se pudo conectar: {e}")
     except ValueError as e:
-        print(f"⚠️ [ERROR FORMATO] {e}")
+        print(f"[ERROR FORMATO] {e}")
     except Exception as e:
-        print(f"❗ [ERROR INESPERADO] {e}")
+        print(f"[ERROR INESPERADO] {e}")
     return None
 
 # Ciclo principal
