@@ -21,6 +21,10 @@ log = logging.getLogger("simtra")
 # del bus es lenta, pero acotado: sin él una conexión colgada bloquea el hilo.
 DEFAULT_TIMEOUT = 10
 
+# Códigos con los que el backend da por bueno un login. Es 201 porque
+# AuthController lo fija así; se admite 200 por si esa ruta se normaliza.
+LOGIN_OK_STATUSES = (200, 201)
+
 
 class ApiService:
     """
@@ -61,15 +65,18 @@ class ApiService:
             log.error(f"[API] {description}: respuesta no es JSON válido (HTTP {response.status_code}) {body!r}")
             return None
 
-    def _result(self, response, description: str):
+    def _result(self, response, description: str, ok_statuses=(200,)):
         """
         Campo `result` de una respuesta correcta, o None. Valida la envoltura
         antes de devolver nada: el resto del sistema no debe recibir estructuras
         a medias.
+
+        `ok_statuses` es parametrizable porque el login del backend responde 201
+        (@HttpCode(201) en AuthController), no el 200 del resto de lecturas.
         """
         if response is None:
             return None
-        if response.status_code != 200:
+        if response.status_code not in ok_statuses:
             log.error(f"[API] {description}: HTTP {response.status_code}")
             return None
 
@@ -142,12 +149,15 @@ class ApiService:
             log.error(f"[API] Login: fallo de red ({e})")
             return ""
 
-        if response.status_code != 200:
+        # El backend emite el token con 201, no con 200: `POST /api/auth/login`
+        # lleva un @HttpCode(201) explícito. Se aceptan ambos para no depender
+        # de ese detalle si algún día se normaliza a 200.
+        if response.status_code not in LOGIN_OK_STATUSES:
             # Nunca se registra usuario ni contraseña.
             log.error(f"[API] Login rechazado (HTTP {response.status_code})")
             return ""
 
-        result = self._result(response, "Login")
+        result = self._result(response, "Login", ok_statuses=LOGIN_OK_STATUSES)
         token = result.get("token") if isinstance(result, dict) else None
 
         if not isinstance(token, str) or not token:
