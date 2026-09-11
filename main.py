@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 import os
 import models
 from database import engine, SessionLocal
-from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate, EventCreate, EventResponse, VehicleCreate, VehicleResponse, NetworkInfoResponse
+from schemas import GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate, DispatchResponse, DispatchCheckpointUpdate, EventCreate, EventResponse, VehicleCreate, VehicleResponse, NetworkInfoResponse, ShutdownResponse
 import crud
-from services import network_info
+from services import network_info, power
 from datetime import datetime
 
 load_dotenv()
@@ -175,6 +175,31 @@ def read_network_info():
     status="unavailable" con la lista vacia.
     """
     return network_info.get_network_info()
+
+
+@app.post("/api/system/shutdown", response_model=ShutdownResponse)
+def shutdown_device():
+    """
+    Apaga ESTE dispositivo (la Raspberry) de forma ordenada.
+
+    La pantalla corre en Chromium en modo kiosco, sin teclado ni escritorio: sin
+    este endpoint la unica forma de apagar el equipo es cortarle la corriente, y
+    eso es lo que termina corrompiendo la tarjeta SD.
+
+    No recibe cuerpo ni parametros: el comando de apagado es una constante del
+    equipo (o SYSTEM_SHUTDOWN_COMMAND), nunca algo que llegue del cliente. El
+    corte ocurre unos segundos DESPUES de responder, para que la pantalla
+    alcance a mostrar el aviso en vez de un error de red.
+
+    La confirmacion del conductor se resuelve en la pantalla: llegar aqui ya
+    significa que acepto el dialogo.
+    """
+    result = power.request_shutdown()
+    return ShutdownResponse(
+        status=result.status,
+        detail=result.detail,
+        scheduled_in_seconds=result.scheduled_in_seconds,
+    )
 
 
 #herramienta de prueba: inyector manual de GPS

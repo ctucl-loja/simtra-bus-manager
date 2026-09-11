@@ -131,3 +131,24 @@ class NetworkConnection(BaseModel):
 class NetworkInfoResponse(BaseModel):
     status: NetworkStatus
     connections: list[NetworkConnection] = []
+
+
+# ─────────────────────────────────────────────
+# ENERGIA DEL DISPOSITIVO
+#
+# Apagado ordenado de ESTA Raspberry (ver services/power.py). Una sola
+# operacion, sin parametros: el cuerpo de la peticion no existe y el comando
+# nunca se arma con datos del cliente.
+# ─────────────────────────────────────────────
+
+# scheduled         = apagado programado; el equipo se corta en unos segundos
+# already_scheduled = ya habia uno en curso, no se lanza un segundo comando
+# unavailable       = el equipo no tiene un comando de apagado utilizable
+ShutdownStatus = Literal["scheduled", "already_scheduled", "unavailable"]
+
+
+class ShutdownResponse(BaseModel):
+    status: ShutdownStatus
+    detail: str
+    # Solo se completa cuando el apagado quedo realmente programado.
+    scheduled_in_seconds: float | None = None

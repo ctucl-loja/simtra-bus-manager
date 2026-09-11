@@ -271,6 +271,61 @@ ni modifica interfaces ni servicios.
 
 ---
 
+## Apagado del dispositivo (`POST /api/system/shutdown`)
+
+Apagado ordenado de ESTA Raspberry, pensado para la pantalla en modo kiosco: sin
+teclado ni escritorio, la unica alternativa era cortarle la corriente al bus, y
+eso es lo que termina corrompiendo la tarjeta SD. Lo consume el boton de apagado
+de la vista `/info` de `bus-display`, que pide confirmacion antes de llamar.
+
+### Contrato
+
+La peticion **no lleva cuerpo ni parametros**: el comando de apagado es una
+constante del equipo, nunca algo que llegue del cliente.
+
+```json
+{ "status": "scheduled", "detail": "El dispositivo se apagara en unos segundos", "scheduled_in_seconds": 3.0 }
+```
+
+| `status` | Significado |
+|---|---|
+| `scheduled` | Apagado programado; el corte ocurre en `scheduled_in_seconds` |
+| `already_scheduled` | Ya habia uno en curso; no se lanza un segundo comando |
+| `unavailable` | El equipo no tiene un comando de apagado utilizable |
+
+`scheduled_in_seconds` solo viene con `scheduled`.
+
+### Por que hay un margen
+
+El corte se planifica unos segundos DESPUES de responder (`GRACE_SECONDS`, 3 s).
+Sin ese margen el sistema empieza a bajar mientras uvicorn escribe la respuesta,
+y la pantalla muestra un error de red en vez del aviso de apagado.
+
+### Comando y permisos
+
+Por defecto: `sudo -n /sbin/shutdown -h now`. Se puede sustituir con
+`SYSTEM_SHUTDOWN_COMMAND` (por ejemplo `systemctl poweroff`). El comando se
+ejecuta como lista de argumentos, con `shell=False`, y nunca se reinicia el
+equipo: no hay `-r` ni endpoint de reinicio.
+
+`sudo -n` falla en vez de esperar una contrasena que nadie va a escribir, asi
+que el usuario del servicio necesita una regla sin contrasena:
+
+```bash
+echo 'admin ALL=(root) NOPASSWD: /sbin/shutdown -h now' | sudo tee /etc/sudoers.d/simtra-shutdown
+sudo chmod 440 /etc/sudoers.d/simtra-shutdown
+```
+
+Si el ejecutable no existe, el endpoint responde `unavailable` en vez de
+prometer un apagado que no va a ocurrir. Si el comando falla al ejecutarse
+(regla de sudo ausente, por ejemplo), el estado se libera y el conductor puede
+reintentar: el boton no queda muerto hasta el proximo arranque.
+
+---
+
+
+---
+
 ## Subsistema de audio
 
 Los anuncios de voz de los puntos de control se generan con **gTTS** y se
