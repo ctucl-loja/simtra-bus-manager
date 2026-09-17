@@ -424,6 +424,89 @@ prometer una accion que no va a ocurrir.
 > El archivo `/etc/sudoers.d/simtra-shutdown` de la version anterior queda
 > sustituido por este. Se puede borrar: `sudo rm /etc/sudoers.d/simtra-shutdown`.
 
+### Solucion: el boton de reinicio falla con `a password is required`
+
+Si al probar el boton aparece en el registro un mensaje como este:
+
+```text
+admin : a password is required ; PWD=/home/admin/simtra-bus-manager ; USER=root ; COMMAND=/sbin/shutdown -r now
+```
+
+el usuario `admin` no tiene autorizado ese comando sin contrasena. El backend
+usa `sudo -n`, por lo que falla sin abrir una solicitud interactiva de clave.
+Tener permiso para `/sbin/shutdown -h now` (apagado) **no autoriza**
+`/sbin/shutdown -r now` (reinicio): los argumentos tambien deben coincidir.
+
+Si ya instalaste las dos reglas de `simtra-power` indicadas arriba, no hace
+falta duplicarlas. Para un equipo que solo tenia configurado el apagado,
+agrega el permiso de reinicio con:
+
+```bash
+sudo visudo -f /etc/sudoers.d/simtra-reboot
+```
+
+Escribe esta linea y guarda el archivo:
+
+```sudoers
+admin ALL=(root) NOPASSWD: /sbin/shutdown -r now
+```
+
+Sustituye `admin` si el servicio se ejecuta con otro usuario. Si configuraste
+`SYSTEM_REBOOT_COMMAND`, la regla debe coincidir con el ejecutable y los
+argumentos que realmente utiliza ese comando.
+
+Comprueba los permisos del archivo y la sintaxis:
+
+```bash
+sudo chmod 440 /etc/sudoers.d/simtra-reboot
+sudo visudo -c
+```
+
+La validacion debe indicar que los archivos se analizaron correctamente.
+El permiso se aplica sin reiniciar la Raspberry ni el backend. Despues puedes
+volver a probar el boton con su confirmacion: **esa prueba reiniciara realmente
+el equipo**. La validacion con `visudo -c` solo comprueba la sintaxis y no
+ejecuta un reinicio.
+
+### El archivo `simtra-power` aparece vacio al abrirlo
+
+`/etc/sudoers.d/simtra-reboot` y `/etc/sudoers.d/simtra-power` son archivos
+distintos. Si antes creaste solo `simtra-reboot`, abrir `simtra-power` con
+`visudo` puede mostrar un archivo nuevo y vacio porque todavia no existe.
+**Reiniciar la Raspberry no deberia borrar las reglas guardadas.**
+
+Para dejar autorizados ambos botones en `simtra-power`, abre:
+
+```bash
+sudo visudo -f /etc/sudoers.d/simtra-power
+```
+
+Agrega las dos reglas (conserva cualquier otra regla necesaria que ya exista):
+
+```sudoers
+admin ALL=(root) NOPASSWD: /sbin/shutdown -h now
+admin ALL=(root) NOPASSWD: /sbin/shutdown -r now
+```
+
+La primera autoriza **apagar** (`-h`) y la segunda **reiniciar** (`-r`). El
+permiso de reinicio por si solo no autoriza el apagado. Si el servicio usa
+otro usuario, sustituye `admin` por ese usuario.
+
+Si `visudo` abre Nano, guarda con **Ctrl+O**, confirma el nombre con **Enter**
+y sal con **Ctrl+X**. Despues comprueba el archivo:
+
+```bash
+sudo chmod 440 /etc/sudoers.d/simtra-power
+sudo cat /etc/sudoers.d/simtra-power
+sudo visudo -c
+```
+
+`cat` debe mostrar las dos reglas y `visudo -c` debe confirmar que la sintaxis
+es correcta. Estos comandos no apagan ni reinician el equipo. Los permisos
+se aplican inmediatamente, sin reiniciar la Raspberry ni el backend.
+Si el archivo sigue vacio, verifica que guardaste los cambios en esa ruta
+exacta y que el editor no mostro un error al guardar.
+
 ---
 
 ## Conexion Wi-Fi (`POST /api/system/wifi/connect`)
