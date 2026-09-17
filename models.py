@@ -28,6 +28,15 @@ class Dispatch(Base):
     date = Column(String, nullable=False, index=True)
     register = Column(Integer, nullable=False, index=True)
     data = Column(JSON, nullable=False)   # lista de steps/checkpoints tal como la entrega el backend
+    # Se incrementa en CADA escritura del despacho. Dos usos, ambos entre
+    # procesos distintos (FastAPI, monitor y loader son servicios systemd
+    # separados, sin memoria compartida):
+    #   · el monitor detecta que la pantalla recargó el itinerario y lo adopta;
+    #   · una carga antigua del monitor que llegue tarde se rechaza en vez de
+    #     pisar una recarga más nueva (ver crud.save_dispatch / base_revision).
+    # Columna añadida después: database.ensure_schema() la agrega en equipos
+    # que ya tenían la tabla creada.
+    revision = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

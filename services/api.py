@@ -11,6 +11,7 @@ Ni la contraseña ni el token se registran nunca en los logs.
 """
 
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 
 import requests
@@ -24,6 +25,43 @@ DEFAULT_TIMEOUT = 10
 # Códigos con los que el backend da por bueno un login. Es 201 porque
 # AuthController lo fija así; se admite 200 por si esa ruta se normaliza.
 LOGIN_OK_STATUSES = (200, 201)
+
+
+# ─────────────────────────────────────────────
+# RESULTADO EXPLÍCITO DE UNA LECTURA DE DESPACHOS
+#
+# `get_dispatch()` devuelve [] tanto cuando el bus no trabaja hoy como cuando la
+# red falló. Para la pantalla eso es indistinguible y es justo la diferencia que
+# necesita la recarga manual: un día sin despachos debe vaciar el itinerario,
+# un error NO debe tocarlo.
+#
+# Se añade un método nuevo en vez de cambiar el existente: los consumidores
+# actuales (bus_monitor.load_all_dispatches) siguen funcionando igual.
+# ─────────────────────────────────────────────
+
+FETCH_OK            = "ok"                 # respuesta válida con despachos
+FETCH_EMPTY         = "empty"              # respuesta válida, el bus no trabaja hoy
+FETCH_AUTH_ERROR    = "auth_error"         # credenciales rechazadas (401/403)
+FETCH_TRANSPORT     = "transport_error"    # red caída, timeout, 5xx, 404…
+FETCH_INVALID       = "invalid_response"   # respondió, pero con una forma inutilizable
+
+
+@dataclass(frozen=True)
+class DispatchFetch:
+    """
+    Resultado de pedir los despachos del día al backend remoto.
+
+    `dispatches` solo tiene contenido con status FETCH_OK. En FETCH_EMPTY es una
+    lista vacía QUE SÍ significa "hoy no hay despachos"; en los estados de error
+    es vacía y NO significa nada sobre el día.
+    """
+    status: str
+    dispatches: list = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """¿La consulta fue válida? (con o sin despachos)"""
+        return self.status in (FETCH_OK, FETCH_EMPTY)
 
 
 class ApiService:
@@ -118,7 +156,11 @@ class ApiService:
         if response.status_code == 401 and retry_on_401:
             log.warning(f"[API] {description}: token no válido o expirado — se renueva y se reintenta una vez")
             if not self.get_jwt():
-                return None
+                # Se devuelve el 401 original en vez de None: para el llamador la
+                # diferencia entre "no hubo red" y "las credenciales no sirven"
+                # es la que separa un error transitorio de uno que exige tocar el
+                # .env, y `fetch_dispatch` la necesita para reportarla.
+                return response
             return self._request(method, path, description, json=json, retry_on_401=False)
 
         return response
@@ -168,18 +210,57 @@ class ApiService:
         log.info("[API] Token renovado")
         return token
 
-    def get_dispatch(self, register, date) -> list:
-        """Despachos del día. Siempre una lista (vacía si no se pudo obtener)."""
+    def fetch_dispatch(self, register, date) -> DispatchFetch:
+        """
+        Despachos del día con resultado EXPLÍCITO.
+
+        Distingue las cuatro situaciones que la pantalla necesita separar:
+
+            FETCH_OK         → hay despachos utilizables
+            FETCH_EMPTY      → el backend respondió bien y el bus no trabaja hoy
+            FETCH_AUTH_ERROR → credenciales rechazadas (401/403 tras reintentar)
+            FETCH_TRANSPORT  → no se pudo hablar con el backend (red, 5xx, 404…)
+            FETCH_INVALID    → respondió, pero el cuerpo no es utilizable
+
+        Nunca lanza. Ni el usuario ni la contraseña aparecen en el log.
+        """
         description = f"GET /api/dispatch/{register}"
         response = self._request("GET", f"/api/dispatch/{register}?date={date}", description)
-        result = self._result(response, description)
 
-        if result is None:
-            return []
+        if response is None:
+            return DispatchFetch(FETCH_TRANSPORT)
+
+        if response.status_code in (401, 403):
+            log.error(f"[API] {description}: credenciales rechazadas (HTTP {response.status_code})")
+            return DispatchFetch(FETCH_AUTH_ERROR)
+
+        if response.status_code != 200:
+            log.error(f"[API] {description}: HTTP {response.status_code}")
+            return DispatchFetch(FETCH_TRANSPORT)
+
+        data = self._json(response, description)
+        if not isinstance(data, dict) or "result" not in data:
+            log.error(f"[API] {description}: cuerpo sin 'result' utilizable")
+            return DispatchFetch(FETCH_INVALID)
+
+        result = data["result"]
         if not isinstance(result, list):
-            log.error(f"[API] {description}: 'result' es {type(result).__name__}, se esperaba lista — se ignora")
-            return []
-        return result
+            log.error(
+                f"[API] {description}: 'result' es {type(result).__name__}, se esperaba lista"
+            )
+            return DispatchFetch(FETCH_INVALID)
+
+        return DispatchFetch(FETCH_OK if result else FETCH_EMPTY, result)
+
+    def get_dispatch(self, register, date) -> list:
+        """
+        Despachos del día. Siempre una lista (vacía si no se pudo obtener).
+
+        Se conserva por compatibilidad con bus_monitor.load_all_dispatches, que
+        solo necesita saber si hay trabajo hoy. Quien deba distinguir "sin
+        despachos" de "falló la consulta" tiene que usar `fetch_dispatch`.
+        """
+        return self.fetch_dispatch(register, date).dispatches
 
     def get_vehicle(self, register) -> Optional[dict]:
         """Ficha del vehículo, o None si no se pudo obtener o no es un objeto."""

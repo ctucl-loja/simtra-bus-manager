@@ -1,4 +1,7 @@
-"""Cliente del backend remoto: timeouts, formas inesperadas y reintento por 401."""
+"""
+Cliente del backend remoto: timeouts, formas inesperadas, reintento por 401 y
+el resultado EXPLÍCITO que necesita la recarga manual del itinerario.
+"""
 
 import unittest
 
@@ -6,7 +9,10 @@ import _bootstrap  # noqa: F401
 
 import requests
 
-from api import ApiService, DEFAULT_TIMEOUT
+from api import (
+    ApiService, DEFAULT_TIMEOUT,
+    FETCH_OK, FETCH_EMPTY, FETCH_AUTH_ERROR, FETCH_TRANSPORT, FETCH_INVALID,
+)
 
 
 class FakeResponse:
@@ -207,6 +213,106 @@ class CredentialsTest(unittest.TestCase):
         registrado = "\n".join(captured.output)
         self.assertNotIn("secreto", registrado)
         self.assertNotIn("user@example.com", registrado)
+
+
+class FetchDispatchTest(unittest.TestCase):
+    """
+    `get_dispatch` devuelve [] tanto si el bus no trabaja hoy como si la red
+    falló, y para la pantalla esas dos cosas son opuestas: una debe vaciar el
+    itinerario y la otra no debe tocarlo. `fetch_dispatch` las separa.
+    """
+
+    def test_respuesta_con_despachos(self):
+        service, _ = build(
+            request_responses=[FakeResponse(200, {"result": [{"step": 1}]})],
+            post_responses=[login_ok()],
+        )
+        result = service.fetch_dispatch(1624, "2026-08-25")
+
+        self.assertEqual(result.status, FETCH_OK)
+        self.assertEqual(result.dispatches, [{"step": 1}])
+        self.assertTrue(result.ok)
+
+    def test_dia_sin_despachos_es_una_respuesta_valida(self):
+        service, _ = build(
+            request_responses=[FakeResponse(200, {"result": []})],
+            post_responses=[login_ok()],
+        )
+        result = service.fetch_dispatch(1624, "2026-08-25")
+
+        self.assertEqual(result.status, FETCH_EMPTY)
+        self.assertEqual(result.dispatches, [])
+        self.assertTrue(result.ok)   # válida, aunque vacía
+
+    def test_fallo_de_red_no_es_un_dia_vacio(self):
+        service, _ = build(
+            request_responses=[requests.ConnectionError("sin señal")],
+            post_responses=[login_ok()],
+        )
+        result = service.fetch_dispatch(1624, "2026-08-25")
+
+        self.assertEqual(result.status, FETCH_TRANSPORT)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.dispatches, [])
+
+    def test_credenciales_rechazadas(self):
+        """401 que sobrevive al reintento: no es un problema de red."""
+        service, _ = build(
+            request_responses=[FakeResponse(401), FakeResponse(401)],
+            post_responses=[login_ok(), login_ok()],
+        )
+        self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_AUTH_ERROR)
+
+    def test_login_fallido_tambien_es_error_de_autenticacion(self):
+        service, _ = build(
+            request_responses=[FakeResponse(401)],
+            post_responses=[login_ok(), FakeResponse(500)],
+        )
+        self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_AUTH_ERROR)
+
+    def test_403_tambien_es_error_de_autenticacion(self):
+        service, _ = build(
+            request_responses=[FakeResponse(403)],
+            post_responses=[login_ok()],
+        )
+        self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_AUTH_ERROR)
+
+    def test_error_del_servidor_es_de_transporte(self):
+        for code in (500, 502, 404):
+            with self.subTest(code=code):
+                service, _ = build(
+                    request_responses=[FakeResponse(code)],
+                    post_responses=[login_ok()],
+                )
+                self.assertEqual(
+                    service.fetch_dispatch(1624, "2026-08-25").status, FETCH_TRANSPORT)
+
+    def test_cuerpo_inutilizable_es_respuesta_invalida(self):
+        casos = [
+            FakeResponse(200, {"data": []}),          # sin 'result'
+            FakeResponse(200, {"result": {"a": 1}}),  # 'result' no es lista
+            FakeResponse(200, "texto suelto"),
+            FakeResponse(200, raise_json=True, text="<html>"),
+        ]
+        for response in casos:
+            with self.subTest(response=response._payload):
+                service, _ = build(request_responses=[response], post_responses=[login_ok()])
+                self.assertEqual(
+                    service.fetch_dispatch(1624, "2026-08-25").status, FETCH_INVALID)
+
+    def test_get_dispatch_sigue_siendo_compatible(self):
+        """El consumidor histórico (bus_monitor) no cambia de comportamiento."""
+        service, _ = build(
+            request_responses=[FakeResponse(200, {"result": [{"step": 1}]})],
+            post_responses=[login_ok()],
+        )
+        self.assertEqual(service.get_dispatch(1624, "2026-08-25"), [{"step": 1}])
+
+        service, _ = build(
+            request_responses=[requests.ConnectionError("sin señal")],
+            post_responses=[login_ok()],
+        )
+        self.assertEqual(service.get_dispatch(1624, "2026-08-25"), [])
 
 
 if __name__ == "__main__":

@@ -422,6 +422,30 @@ CURRENT_CONTEXT: TemporalContext = TemporalContext(state=BEFORE_FIRST_STEP)
 CONFIRMED_CHECKPOINTS: set[int] = set()   # persistidos: no se vuelven a reportar
 IN_FLIGHT_CHECKPOINTS: set[int] = set()   # reservados, persistencia en curso
 
+# ─────────────────────────────────────────────
+# COORDINACIÓN CON LA RECARGA MANUAL DE LA PANTALLA
+#
+# FastAPI, este monitor y data_loader son unidades systemd SEPARADAS: no
+# comparten memoria. Cuando el conductor toca «Volver a cargar itinerario», la
+# API local guarda el despacho nuevo, incrementa `dispatch.revision` y publica
+# un evento `dispatch_refreshed`. Este proceso lo ve en su ciclo de watcher y
+# adopta el itinerario LEYÉNDOLO DE LA API LOCAL — no lo vuelve a descargar del
+# backend remoto, así trabaja exactamente sobre lo que quedó guardado.
+#
+# Ninguna de las dos partes importa a la otra: tocar una global de este módulo
+# desde FastAPI no afectaría al proceso real, que es otro intérprete.
+# ─────────────────────────────────────────────
+
+DISPATCH_REFRESHED_EVENT = "dispatch_refreshed"
+
+# Revisión del despacho local sobre la que está trabajando este proceso. Se usa
+# para dos cosas: no re-adoptar lo ya adoptado, y declarar `base_revision` al
+# cachear, para que una carga iniciada antes de una recarga manual no la pise.
+LAST_REVISION: int = 0
+
+# Último evento leído del canal local. El polling es incremental (after_id).
+LAST_EVENT_ID: int = 0
+
 
 def get_dispatches() -> list[dict]:
     """
@@ -483,14 +507,33 @@ def release_checkpoint(checkpoint_id: int):
         IN_FLIGHT_CHECKPOINTS.discard(checkpoint_id)
 
 
+def get_revision() -> int:
+    with _lock:
+        return LAST_REVISION
+
+
+def set_revision(revision: int):
+    """
+    Registra la revisión del despacho sobre la que trabaja este proceso.
+
+    Monótona: una respuesta que llegue tarde con una revisión vieja no puede
+    hacer retroceder el marcador y provocar una re-adopción en bucle.
+    """
+    global LAST_REVISION
+    with _lock:
+        if isinstance(revision, int) and revision > LAST_REVISION:
+            LAST_REVISION = revision
+
+
 def reset_daily_state():
     """Borra el rastro del día anterior: ningún step viejo debe quedar elegible."""
-    global ALL_DISPATCHES, CURRENT_CONTEXT
+    global ALL_DISPATCHES, CURRENT_CONTEXT, LAST_REVISION
     with _lock:
         ALL_DISPATCHES  = []
         CURRENT_CONTEXT = TemporalContext(state=BEFORE_FIRST_STEP)
         CONFIRMED_CHECKPOINTS.clear()
         IN_FLIGHT_CHECKPOINTS.clear()
+        LAST_REVISION = 0
 
 
 # ─────────────────────────────────────────────
@@ -507,6 +550,12 @@ def load_all_dispatches(date: Optional[str] = None) -> bool:
 
     query_date = date or datetime.now().strftime('%Y-%m-%d')
     log.info(f"Consultando despachos para bus={BUS_REGISTER} fecha={query_date}")
+
+    # Revisión local ANTES de salir a la red. Es la que se declara al cachear:
+    # si mientras se descargaba el conductor recargó el itinerario desde la
+    # pantalla, la revisión almacenada será mayor y la API rechazará esta
+    # escritura en vez de deshacer la recarga (ver crud.save_dispatch).
+    base_revision = read_local_revision(query_date)
 
     try:
         dispatches = simtra.get_dispatch(BUS_REGISTER, query_date)
@@ -537,7 +586,8 @@ def load_all_dispatches(date: Optional[str] = None) -> bool:
     # unos despachos que ya están cargados en memoria y son válidos.
     for label, action in (
         ("seed de checkpoints", lambda: seed_reported_checkpoints(dispatches)),
-        ("cache local del despacho", lambda: cache_dispatch_locally(dispatches, query_date)),
+        ("cache local del despacho",
+         lambda: cache_dispatch_locally(dispatches, query_date, base_revision)),
         ("sincronización del vehículo", sync_vehicle_info),
     ):
         try:
@@ -576,10 +626,45 @@ def cache_vehicle_locally(vehicle: dict):
         log.error(f"No se pudo cachear la información del vehículo: {e}")
 
 
-def cache_dispatch_locally(dispatches: list[dict], date: str):
+def read_local_dispatch() -> Optional[dict]:
+    """
+    Despacho guardado en la API local ({date, register, data, revision}), o None.
+
+    Es la vía por la que este proceso adopta lo que la pantalla acaba de
+    recargar: se lee lo que quedó GUARDADO, no se vuelve a descargar del backend
+    remoto, para que monitor y pantalla trabajen sobre exactamente el mismo
+    itinerario.
+    """
+    try:
+        resp = requests.get(f"{LOCAL_BACKEND}/api/dispatch", timeout=5)
+        resp.raise_for_status()
+        body = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        log.error(f"No se pudo leer el despacho local: {e}")
+        return None
+
+    return body if isinstance(body, dict) else None
+
+
+def read_local_revision(date: str) -> Optional[int]:
+    """Revisión del despacho local para esa fecha, o None si no hay/no coincide."""
+    local = read_local_dispatch()
+    if not local or local.get("date") != date:
+        return None
+    revision = local.get("revision")
+    return revision if isinstance(revision, int) else None
+
+
+def cache_dispatch_locally(dispatches: list[dict], date: str,
+                           base_revision: Optional[int] = None):
     """
     Guarda los despachos del día en el backend local (API - CLIENT) para que
     otros servicios los consulten sin repetir la llamada al backend remoto.
+
+    `base_revision` declara sobre qué revisión se basa esta escritura. Si entre
+    la lectura y este POST la pantalla recargó el itinerario, la API descarta la
+    escritura y este proceso adopta la versión nueva en el siguiente ciclo del
+    watcher, en vez de sobrescribirla con datos ya viejos.
     """
     try:
         payload = {
@@ -587,11 +672,28 @@ def cache_dispatch_locally(dispatches: list[dict], date: str):
             "register": BUS_REGISTER,
             "data": dispatches,
         }
+        if base_revision is not None:
+            payload["base_revision"] = base_revision
+
         resp = requests.post(f"{LOCAL_BACKEND}/api/dispatch", json=payload, timeout=5)
         resp.raise_for_status()
-        log.debug("Despachos cacheados en el backend local")
-    except requests.RequestException as e:
+        body = resp.json()
+    except (requests.RequestException, ValueError) as e:
         log.error(f"No se pudo cachear los despachos localmente: {e}")
+        return
+
+    stored = body.get("revision") if isinstance(body, dict) else None
+    if base_revision is not None and isinstance(stored, int) and stored > (base_revision + 1):
+        # La API no aplicó nuestra escritura: hay una recarga más nueva.
+        log.warning(
+            f"El despacho local está en la revisión {stored}: la carga de este proceso "
+            f"se descartó por vieja y se adoptará la versión guardada"
+        )
+        return
+
+    if isinstance(stored, int):
+        set_revision(stored)
+    log.debug("Despachos cacheados en el backend local")
 
 
 def seed_reported_checkpoints(dispatches: list[dict]):
@@ -809,7 +911,7 @@ def prefetch_upcoming_audio(step: dict, after_order: int, count: int = 2):
 # APLICACIÓN DEL CONTEXTO
 # ─────────────────────────────────────────────
 
-def apply_context(context: TemporalContext, monitor_ref: list) -> bool:
+def apply_context(context: TemporalContext, monitor_ref: list, replace: bool = False) -> bool:
     """
     Publica el contexto temporal como estado vigente y amplía la ventana de
     geocercas observadas (anterior + actual + siguiente).
@@ -817,6 +919,12 @@ def apply_context(context: TemporalContext, monitor_ref: list) -> bool:
     No decide nada por sí misma: el contexto ya viene resuelto por el reloj.
     Devuelve True si el contexto cambió respecto del anterior.
     monitor_ref es [monitor] para poder mutar la referencia desde el watcher.
+
+    `replace=True` SUSTITUYE la ventana en vez de ampliarla. Solo lo usa la
+    adopción de un itinerario recargado: ahí las geocercas del itinerario
+    anterior ya no corresponden y deben dejar de observarse, aunque el bus siga
+    en el mismo tramo. Se conserva el estado de las que sobreviven, para no
+    emitir un aviso de llegada por una geocerca en la que el bus ya estaba.
     """
     global CURRENT_CONTEXT
 
@@ -827,9 +935,11 @@ def apply_context(context: TemporalContext, monitor_ref: list) -> bool:
         monitor = monitor_ref[0]
 
     # Fuera del lock: tocar el monitor y encolar audio no debe bloquear al hilo GPS.
-    monitor.add_geofences(
-        merge_geofences(context.previous_step, context.current_step, context.next_step)
-    )
+    window = merge_geofences(context.previous_step, context.current_step, context.next_step)
+    if replace:
+        monitor.replace_geofences(window)
+    else:
+        monitor.add_geofences(window)
 
     if not changed:
         return False
@@ -846,6 +956,124 @@ def apply_context(context: TemporalContext, monitor_ref: list) -> bool:
         prefetch_upcoming_audio(context.current_step, -1, 2)
 
     return True
+
+
+# ─────────────────────────────────────────────
+# ADOPCIÓN DE UN ITINERARIO RECARGADO DESDE LA PANTALLA
+# ─────────────────────────────────────────────
+
+def adopt_local_dispatch(monitor_ref: list, now: Optional[datetime] = None) -> bool:
+    """
+    Toma el despacho GUARDADO en la API local como itinerario vigente y
+    reconstruye contexto temporal y geocercas.
+
+    Se invoca cuando la pantalla recargó el itinerario. Lo que NO hace, y es
+    deliberado:
+
+      · No llama al backend remoto. Adopta exactamente lo que quedó guardado,
+        para que monitor y pantalla no puedan discrepar.
+      · No llama a reset_daily_state(). Eso borraría CONFIRMED_CHECKPOINTS y el
+        bus volvería a reportar —y a anunciar— llegadas que ya registró hoy.
+        La deduplicación del día sobrevive a la recarga.
+      · No reemplaza el GeofenceMonitor por uno nuevo: sustituye su ventana
+        conservando el estado de las geocercas que siguen vigentes, así que
+        estar dentro de una no se vuelve a leer como una entrada.
+
+    Devuelve True si adoptó algo.
+    """
+    local = read_local_dispatch()
+    if not local:
+        return False
+
+    today = (now or datetime.now()).strftime('%Y-%m-%d')
+    if local.get("date") != today:
+        log.warning(f"[REFRESH] El despacho local es de {local.get('date')!r}, no de hoy — no se adopta")
+        return False
+
+    if local.get("register") != BUS_REGISTER:
+        log.warning("[REFRESH] El despacho local es de otro bus — no se adopta")
+        return False
+
+    data = local.get("data")
+    if not isinstance(data, list):
+        log.error("[REFRESH] El despacho local no es una lista — no se adopta")
+        return False
+
+    revision = local.get("revision")
+    if isinstance(revision, int) and revision <= get_revision():
+        return False   # ya se está trabajando sobre esa revisión o una más nueva
+
+    global ALL_DISPATCHES
+    with _lock:
+        ALL_DISPATCHES = data
+
+    if isinstance(revision, int):
+        set_revision(revision)
+
+    # Las llegadas que el itinerario nuevo ya trae se suman a las confirmadas.
+    # `seed_reported_checkpoints` hace update, no clear: lo marcado hoy sigue
+    # marcado aunque el backend todavía no lo refleje.
+    try:
+        seed_reported_checkpoints(data)
+    except Exception as e:
+        log.exception(f"[REFRESH] Fallo al sembrar checkpoints reportados: {e}")
+
+    apply_context(
+        resolve_temporal_context(get_dispatches(), now or datetime.now()),
+        monitor_ref,
+        replace=True,
+    )
+
+    log.info(
+        f"[REFRESH] Itinerario recargado adoptado (revisión {revision}): "
+        f"{len(data)} recorrido(s), {len(monitor_ref[0].geofences)} geocerca(s) observadas"
+    )
+    return True
+
+
+def poll_dispatch_refresh(monitor_ref: list) -> bool:
+    """
+    Revisa el canal local de eventos y adopta el itinerario si la pantalla lo
+    recargó. Se llama desde el watcher, así que el retraso máximo de adopción es
+    WATCHER_INTERVAL_SECONDS (10 s por defecto).
+
+    Usa el polling incremental de `GET /api/events?after_id=`: solo eventos
+    nuevos, en el orden en que ocurrieron. La primera vuelta se sincroniza con
+    el último evento existente sin adoptar nada — eventos de horas atrás no
+    deben disparar una adopción al arrancar el servicio.
+    """
+    global LAST_EVENT_ID
+
+    try:
+        resp = requests.get(
+            f"{LOCAL_BACKEND}/api/events",
+            params={"event_type": DISPATCH_REFRESHED_EVENT, "after_id": LAST_EVENT_ID, "limit": 20},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        events = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        log.debug(f"[REFRESH] No se pudo consultar el canal de eventos: {e}")
+        return False
+
+    if not isinstance(events, list) or not events:
+        return False
+
+    newest = LAST_EVENT_ID
+    for event in events:
+        if isinstance(event, dict) and isinstance(event.get("id"), int):
+            newest = max(newest, event["id"])
+
+    first_pass = LAST_EVENT_ID == 0
+    LAST_EVENT_ID = newest
+
+    if first_pass:
+        # Sincronización inicial: el itinerario vigente ya se cargó en main();
+        # reaccionar a eventos viejos solo produciría una adopción redundante.
+        log.debug(f"[REFRESH] Canal de eventos sincronizado en id={newest}")
+        return False
+
+    return adopt_local_dispatch(monitor_ref)
 
 
 # ─────────────────────────────────────────────
@@ -885,6 +1113,13 @@ def schedule_watcher(monitor_ref: list, stop_event: threading.Event):
                 if not load_all_dispatches():
                     log.warning("[WATCHER] Bus sin despachos hoy")
                 apply_context(resolve_temporal_context(get_dispatches(), datetime.now()), monitor_ref)
+                continue
+
+            # ── Recarga manual desde la pantalla ─────────────────────────────
+            # Va antes que el resto: si el conductor acaba de recargar, el ciclo
+            # debe razonar sobre el itinerario nuevo, no sobre el que quedó en
+            # memoria. Adoptar ya resuelve el contexto, así que se corta aquí.
+            if poll_dispatch_refresh(monitor_ref):
                 continue
 
             dispatches = get_dispatches()
@@ -1456,6 +1691,27 @@ class GeofenceMonitor:
                 if gid not in self._active:
                     self._active[gid] = None
                     self.geofences.append(geo)
+
+    def replace_geofences(self, geofences: list[dict]):
+        """
+        Sustituye la ventana de geocercas observadas CONSERVANDO el estado de
+        las que siguen presentes.
+
+        Lo usa la adopción de un itinerario recargado: los recorridos pueden ser
+        otros, así que hay geocercas que sobran y geocercas nuevas. Crear un
+        GeofenceMonitor desde cero sería más simple pero olvidaría que el bus ya
+        está DENTRO de una geocerca, y la siguiente lectura GPS la leería como
+        una entrada nueva: aviso de llegada repetido.
+
+        Las geocercas que desaparecen sí pierden su estado — ya no se observan.
+        """
+        with self._mutex:
+            incoming = {geo["id"]: geo for geo in geofences}
+            self._active = {
+                gid: self._active.get(gid)   # None para las nuevas
+                for gid in incoming
+            }
+            self.geofences = list(incoming.values())
 
     def process(self, reading: GpsReading):
         now = datetime.now()

@@ -82,30 +82,54 @@ Documentación interactiva disponible en: `http://192.168.1.14:8000/docs`
 
 ## Tests
 
-Suite de `unittest` (biblioteca estandar, sin dependencias nuevas) sobre la
-logica critica: parsing de horarios, contexto temporal, lecturas GPS, ciclo de
-vida de las marcaciones, cliente HTTP remoto y deteccion de red.
+Suite de `unittest` (biblioteca estandar) sobre la logica critica: parsing de
+horarios, contexto temporal, lecturas GPS, ciclo de vida de las marcaciones,
+cliente HTTP remoto, deteccion de red, conexion Wi-Fi, energia, recarga del
+itinerario y coordinacion con el monitor.
 
 ```bash
 python3 -m unittest discover -s tests -t tests
 ```
 
 No requiere variables de entorno ni red: `tests/_bootstrap.py` sustituye
-`python-dotenv` y `gTTS` por stubs cuando no estan instalados, y tanto el
-cliente remoto como la deteccion de red se ejercitan con salidas simuladas —
-ningun test depende de las interfaces reales de la maquina.
+`python-dotenv` y `gTTS` por stubs cuando no estan instalados, y el cliente
+remoto, la deteccion de red, la conexion Wi-Fi y los comandos de energia se
+ejercitan con dobles inyectados — **ningun test apaga, reinicia ni toca la red
+de la maquina donde corre**.
 
-`main.py`, `crud.py` y `schemas.py` no tienen tests: necesitan fastapi,
-sqlalchemy y pydantic instalados, asi que se validan ejecutando el servicio.
+### Dos niveles, y por que importa la diferencia
+
+| Archivo | Que ejercita | Dependencias |
+|---|---|---|
+| Todos menos el siguiente | Funciones puras y servicios, con stubs | Ninguna |
+| `tests/test_api_endpoints.py` | **Endpoints reales**: FastAPI + Pydantic + SQLAlchemy sobre SQLite temporal | `fastapi`, `sqlalchemy`, `httpx` |
+
+Los tests unitarios **no validan los endpoints**: no importan `main.py` y no
+ejercitan ni el enrutado, ni los `response_model`, ni la persistencia. Para eso
+esta `test_api_endpoints.py`, que se **salta con un motivo visible** si faltan
+las dependencias, para que la suite siga corriendo en una maquina pelada:
+
+```bash
+pip install fastapi sqlalchemy httpx
+python3 -m unittest discover -s tests -t tests   # ya sin "skipped"
+```
+
+Cada test de integracion usa una base SQLite **temporal y propia** (nunca
+`./app.db`) y un doble del backend remoto.
 
 ---
 
 ## Eventos locales (`/api/events`)
 
 `/api/events` es el **canal local de eventos entre los procesos instalados en la
-Raspberry Pi**. No sale a internet: `bus_monitor.py` escribe y `bus-display` lee,
-ambos contra el FastAPI local. Los eventos quedan en SQLite y sirven además como
-bitácora de la jornada.
+Raspberry Pi**. No sale a internet: los tres servicios escriben y leen contra el
+FastAPI local. Los eventos quedan en SQLite y sirven además como bitácora de la
+jornada.
+
+| Evento | Lo emite | Lo consume |
+|---|---|---|
+| `checkpoint_arrival` | `bus_monitor.py` | `bus-display` (aviso de llegada) |
+| `dispatch_refreshed` | `main.py`, tras una recarga manual | `bus_monitor.py` (adopta el itinerario nuevo) |
 
 ### `checkpoint_arrival`
 
@@ -201,16 +225,40 @@ primero), igual que el resto de filtros (`priority`, `event_type`, `start_date`,
 No existe marca de "leído" en la base: el consumidor recuerda localmente el
 último id que procesó y los eventos nunca se modifican después de emitirse.
 
+### `dispatch_refreshed`
+
+Se emite cuando el conductor recarga el itinerario desde la pantalla y la
+operación **cambió realmente** lo guardado (`updated` o `empty`). Un error de red
+o un payload inválido **no emiten evento**: el monitor no debe despertar por una
+recarga que no cambió nada.
+
+```json
+{ "date": "2026-09-17", "register": 1624, "revision": 4, "steps": 2, "checkpoints": 5 }
+```
+
+Es el mecanismo de coordinación entre procesos descrito en
+[Coordinación con simtra-bus-monitor](#coordinacion-con-simtra-bus-monitor). El
+evento se publica **después** del commit: el monitor nunca ve una revisión que
+todavía podría no existir.
+
 ---
 
-## Informacion de red (`/api/system/network`)
+## Informacion de red (`GET /api/system/network`)
 
 Endpoint local, de **solo lectura**, que describe a que red esta conectada ESTA
 Raspberry. Existe porque el navegador no puede consultar el SSID ni las
-interfaces del sistema: lo consume la vista `/info` de `bus-display`.
+interfaces del sistema: lo consume la vista `/settings` (Configuracion) de
+`bus-display`.
 
 Cuando la pantalla se abre desde una laptop, la respuesta sigue describiendo la
 Raspberry — es la maquina donde corre este servicio.
+
+> **Nota.** Este endpoint sigue siendo de solo lectura, pero **ya no es cierto
+> que toda operacion de red lo sea**: desde la vista de Configuracion el equipo
+> puede conectarse a una red Wi-Fi (`POST /api/system/wifi/connect`, mas abajo).
+> `services/network_info.py` no escribe nada; quien lo hace es
+> `services/wifi.py`, deliberadamente en otro modulo para que la frontera quede
+> explicita.
 
 ### Contrato
 
@@ -266,63 +314,380 @@ peticion. El lock del cache **no** se mantiene durante los subprocess.
 
 Ni contrasenas de Wi-Fi, ni claves, ni JWT, ni archivos de configuracion, ni
 rutas, ni DNS, ni gateway, ni MAC, ni nada del router Teltonika ni de otras
-maquinas. Tampoco existe ninguna operacion de escritura: no conecta, desconecta
-ni modifica interfaces ni servicios.
+maquinas. **Este endpoint** no escribe: no conecta, desconecta ni modifica
+interfaces ni servicios. La unica escritura sobre la red vive en
+`POST /api/system/wifi/connect`, y tampoco devuelve nunca una clave.
 
 ---
 
-## Apagado del dispositivo (`POST /api/system/shutdown`)
+## Energia del dispositivo: apagado y reinicio
 
-Apagado ordenado de ESTA Raspberry, pensado para la pantalla en modo kiosco: sin
-teclado ni escritorio, la unica alternativa era cortarle la corriente al bus, y
-eso es lo que termina corrompiendo la tarjeta SD. Lo consume el boton de apagado
-de la vista `/info` de `bus-display`, que pide confirmacion antes de llamar.
+Dos endpoints, pensados para la pantalla en modo kiosco: sin teclado ni
+escritorio, la unica alternativa era cortarle la corriente al bus, y eso es lo
+que termina corrompiendo la tarjeta SD. Los consume la vista `/settings`
+(Configuracion) de `bus-display`, que pide **confirmacion explicita** antes de
+llamar a cualquiera de los dos.
+
+| Endpoint | Accion |
+|---|---|
+| `POST /api/system/shutdown` | Apaga el equipo |
+| `POST /api/system/reboot` | Reinicia el equipo |
 
 ### Contrato
 
-La peticion **no lleva cuerpo ni parametros**: el comando de apagado es una
-constante del equipo, nunca algo que llegue del cliente.
+Ninguna de las dos peticiones **lleva cuerpo ni parametros**: el comando es una
+constante del equipo (o una variable de entorno suya) y **el frontend nunca
+puede proponerlo**. Lo unico que el cliente elige es la RUTA.
 
 ```json
-{ "status": "scheduled", "detail": "El dispositivo se apagara en unos segundos", "scheduled_in_seconds": 3.0 }
+{
+  "status": "scheduled",
+  "detail": "El dispositivo se reiniciara en unos segundos",
+  "scheduled_in_seconds": 3.0,
+  "action": "reboot",
+  "pending_action": "reboot"
+}
+```
+
+| Campo | Significado |
+|---|---|
+| `status` | `scheduled` \| `already_scheduled` \| `unavailable` |
+| `action` | Lo que se pidio en ESTA peticion |
+| `pending_action` | Lo que el equipo tiene realmente pendiente |
+| `scheduled_in_seconds` | Solo viene con `scheduled` |
+
+| `status` | Significado |
+|---|---|
+| `scheduled` | Accion programada; la orden se da en `scheduled_in_seconds` |
+| `already_scheduled` | Ya habia una en curso; no se lanza un segundo comando |
+| `unavailable` | El equipo no tiene un comando utilizable para esa accion |
+
+**`scheduled` NO significa que el equipo ya se apago o reinicio.** Significa que
+el sistema recibira la orden en unos segundos; el proceso que responde se va a
+morir con el equipo y no puede confirmar nada mas.
+
+### Exclusion mutua
+
+Apagado y reinicio **no pueden estar programados a la vez**. Si el conductor
+toca «Reiniciar» cuando ya hay un apagado en curso, la respuesta es
+`already_scheduled` con `pending_action: "shutdown"`, y la pantalla anuncia el
+apagado — anunciar un reinicio dejaria al conductor esperando una pantalla que
+no va a volver.
+
+### Por que hay un margen
+
+La ejecucion se planifica unos segundos DESPUES de responder (`GRACE_SECONDS`,
+3 s). Sin ese margen el sistema empieza a bajar mientras uvicorn escribe la
+respuesta, y la pantalla muestra un error de red en vez del aviso.
+
+Si la programacion o la ejecucion fallan (regla de sudo ausente, por ejemplo),
+el estado se libera y el conductor puede reintentar: el boton no queda muerto
+hasta el proximo arranque.
+
+### Comandos exactos
+
+| Accion | Comando por defecto | Variable de entorno |
+|---|---|---|
+| Apagado | `sudo -n /sbin/shutdown -h now` | `SYSTEM_SHUTDOWN_COMMAND` |
+| Reinicio | `sudo -n /sbin/shutdown -r now` | `SYSTEM_REBOOT_COMMAND` |
+
+El reinicio usa `shutdown -r now` y no `reboot now`: **`reboot` no acepta un
+argumento `now`** y esa forma fallaria. `shutdown -r now` es el equivalente
+correcto en Raspberry Pi OS (Bookworm, systemd). Alternativas validas para las
+variables: `systemctl poweroff` y `systemctl reboot`.
+
+Los comandos se ejecutan como **lista de argumentos con `shell=False`**: no se
+arma ninguna linea de comando por concatenacion.
+
+### Permisos minimos
+
+`sudo -n` falla en vez de esperar una contrasena que nadie va a escribir, asi
+que el usuario del servicio necesita reglas sin contrasena. **Se conceden los
+dos comandos exactos, nunca `ALL`**: una regla generica permitiria ejecutar
+cualquier cosa como root desde un proceso expuesto en la red del bus.
+
+```bash
+sudo tee /etc/sudoers.d/simtra-power > /dev/null <<'EOF'
+admin ALL=(root) NOPASSWD: /sbin/shutdown -h now
+admin ALL=(root) NOPASSWD: /sbin/shutdown -r now
+EOF
+sudo chmod 440 /etc/sudoers.d/simtra-power
+sudo visudo -c        # valida la sintaxis antes de confiar en ella
+```
+
+Si se usan las variantes de systemd, las reglas son
+`/usr/bin/systemctl poweroff` y `/usr/bin/systemctl reboot`.
+
+Si el ejecutable no existe, el endpoint responde `unavailable` en vez de
+prometer una accion que no va a ocurrir.
+
+> El archivo `/etc/sudoers.d/simtra-shutdown` de la version anterior queda
+> sustituido por este. Se puede borrar: `sudo rm /etc/sudoers.d/simtra-shutdown`.
+
+---
+
+## Conexion Wi-Fi (`POST /api/system/wifi/connect`)
+
+**Unica operacion que escribe sobre la red del equipo.** La consume el
+formulario de la vista `/settings` de `bus-display`. Vive en `services/wifi.py`,
+separado de `services/network_info.py`, que sigue siendo de solo lectura.
+
+### Terminologia: «usuario» = nombre de red (SSID)
+
+En la conversacion del proyecto se hablo de «usuario y clave» de la red. En esta
+implementacion **«usuario» significa el NOMBRE DE LA RED WI-FI (SSID)**, y asi
+esta etiquetado el campo en la pantalla: «Nombre de red (SSID)».
+
+No tiene ninguna relacion con el usuario del backend remoto SIMTRA
+(`FAST_API_BACKEND_USERNAME`), ni con un usuario del sistema. **No hay soporte
+802.1X / WPA-Enterprise** (usuario + contrasena contra un RADIUS): el equipo se
+conecta a redes WPA/WPA2-PSK o abiertas, que es lo que hay en un patio de buses.
+
+### Contrato
+
+```jsonc
+// Peticion
+{ "ssid": "SIMTRA-PATIO", "password": "clave-de-la-red" }   // password null o "" = red abierta,
+                                                            // o reconectar con el perfil guardado
+// Respuesta
+{
+  "status": "connected",
+  "detail": "Conectado a la red",
+  "ssid": "SIMTRA-PATIO",
+  "network": { "status": "connected", "connections": [ /* igual que GET /api/system/network */ ] }
+}
 ```
 
 | `status` | Significado |
 |---|---|
-| `scheduled` | Apagado programado; el corte ocurre en `scheduled_in_seconds` |
-| `already_scheduled` | Ya habia uno en curso; no se lanza un segundo comando |
-| `unavailable` | El equipo no tiene un comando de apagado utilizable |
+| `connected` | **Verificado**: la red pedida quedo activa |
+| `invalid_password` | El punto de acceso rechazo el secreto |
+| `not_found` | El SSID no esta visible |
+| `timeout` | No se pudo confirmar a tiempo |
+| `unavailable` | No hay NetworkManager/`nmcli` utilizable |
+| `no_adapter` | No hay adaptador Wi-Fi gestionado |
+| `not_authorized` | Faltan permisos (polkit) |
+| `busy` | Ya hay un intento en curso |
+| `failed` | Cualquier otro fallo |
 
-`scheduled_in_seconds` solo viene con `scheduled`.
+`network` solo viene con `connected`. **Nunca responde 500**: la falta de
+herramienta, de adaptador o de permisos son estados propios de la respuesta.
 
-### Por que hay un margen
+### Manejo de la clave
 
-El corte se planifica unos segundos DESPUES de responder (`GRACE_SECONDS`, 3 s).
-Sin ese margen el sistema empieza a bajar mientras uvicorn escribe la respuesta,
-y la pantalla muestra un error de red en vez del aviso de apagado.
+* Viaja a `nmcli` por **STDIN** (`nmcli --ask`), **nunca en la linea de
+  comandos**: asi no es visible en `ps`, en `/proc/<pid>/cmdline` ni en la
+  auditoria del sistema.
+* **No se registra en ningun log** ni se devuelve al cliente, ni siquiera dentro
+  de un mensaje de error: los errores se traducen a mensajes fijos y la salida
+  cruda de `nmcli` se depura antes de loguearse.
+* **No se guarda en ninguna tabla** de este proyecto. Quien la conserva es
+  NetworkManager, en su perfil de conexion
+  (`/etc/NetworkManager/system-connections/`, modo 0600, root) — su mecanismo
+  normal.
+* La validacion fina vive en el servicio y **sus mensajes no citan el valor
+  recibido**. Por eso un parametro invalido devuelve 200 con `status: "failed"` y
+  no un 422 de Pydantic, que incluiria la clave en el detalle del error.
 
-### Comando y permisos
+### El exito se verifica, no se supone
 
-Por defecto: `sudo -n /sbin/shutdown -h now`. Se puede sustituir con
-`SYSTEM_SHUTDOWN_COMMAND` (por ejemplo `systemctl poweroff`). El comando se
-ejecuta como lista de argumentos, con `shell=False`, y nunca se reinicia el
-equipo: no hay `-r` ni endpoint de reinicio.
+Que `nmcli` devuelva 0 **no basta**: despues de conectar se comprueba con
+`nmcli connection show --active` que la conexion pedida este realmente activa
+sobre un dispositivo Wi-Fi. Solo entonces se responde `connected`, se invalida el
+cache de 15 s de `network_info.py` (o la pantalla mostraria la IP anterior) y se
+devuelve la red nueva.
 
-`sudo -n` falla en vez de esperar una contrasena que nadie va a escribir, asi
-que el usuario del servicio necesita una regla sin contrasena:
+Un `timeout` tambien pasa por esa verificacion: la asociacion puede terminar
+justo despues, y darla por fallida seria igual de erroneo.
 
-```bash
-echo 'admin ALL=(root) NOPASSWD: /sbin/shutdown -h now' | sudo tee /etc/sudoers.d/simtra-shutdown
-sudo chmod 440 /etc/sudoers.d/simtra-shutdown
-```
+### Reconexion con clave nueva
 
-Si el ejecutable no existe, el endpoint responde `unavailable` en vez de
-prometer un apagado que no va a ocurrir. Si el comando falla al ejecutarse
-(regla de sudo ausente, por ejemplo), el estado se libera y el conductor puede
-reintentar: el boton no queda muerto hasta el proximo arranque.
+Si se envia una clave y ya existe un perfil con ese nombre, **se borra primero**.
+Sin eso NetworkManager reutiliza el secreto guardado, `--ask` no llega a
+preguntar y la clave nueva se ignora en silencio. Con el campo de clave VACIO no
+se borra nada: ahi el conductor esta pidiendo reconectar con lo que ya hay.
+
+### Requisitos reales de despliegue
+
+1. **NetworkManager con `nmcli` en el PATH.** Raspberry Pi OS Bookworm lo trae
+   por defecto; en Bullseye o con `dhcpcd`/`wpa_supplicant` hay que instalarlo y
+   activarlo:
+   ```bash
+   sudo apt install network-manager
+   sudo systemctl enable --now NetworkManager
+   ```
+   Sin el, el endpoint responde `unavailable` y la pantalla lo dice.
+2. **Adaptador Wi-Fi gestionado por NetworkManager.** Si aparece como
+   `unmanaged`, el endpoint responde `no_adapter`.
+3. **Permisos.** El usuario del servicio debe poder modificar conexiones sin
+   contrasena. Lo habitual es anadirlo al grupo `netdev`; si la politica de
+   polkit del equipo no lo permite, hace falta una regla explicita:
+   ```bash
+   sudo usermod -aG netdev admin
+
+   sudo tee /etc/polkit-1/rules.d/50-simtra-wifi.rules > /dev/null <<'EOF'
+   polkit.addRule(function(action, subject) {
+     if (subject.user == "admin" &&
+         (action.id == "org.freedesktop.NetworkManager.settings.modify.system" ||
+          action.id == "org.freedesktop.NetworkManager.network-control")) {
+       return polkit.Result.YES;
+     }
+   });
+   EOF
+   sudo systemctl restart polkit
+   ```
+   Sin permisos, el endpoint responde `not_authorized`.
+
+### Aviso operativo
+
+Cambiar de red **corta el acceso desde cualquier otro dispositivo de la red
+anterior**. Si la pantalla se estaba viendo desde una laptop, esa peticion se
+queda sin respuesta: eso NO significa que la conexion fallara, y la pantalla lo
+dice asi en vez de reportar un fracaso.
 
 ---
 
+
+---
+
+## Recarga manual del itinerario (`POST /api/dispatch/refresh`)
+
+Lo que hace el boton «Volver a cargar itinerario» de la Home. **No es repetir
+`GET /api/dispatch`**: ese endpoint solo lee lo que ya esta cacheado en la RPi,
+asi que si el monitor no ha recargado devuelve lo mismo una y otra vez.
+
+### Flujo real
+
+```
+pantalla -> POST /api/dispatch/refresh (API local)
+         -> backend remoto SIMTRA (services/api.py, con JWT)
+         -> validacion de estructura
+         -> fusion con las marcaciones locales pendientes
+         -> persistencia en SQLite, en una transaccion
+         -> respuesta con el despacho REALMENTE guardado
+         -> evento `dispatch_refreshed` -> simtra-bus-monitor lo adopta
+```
+
+La peticion **no lleva cuerpo**: el registro sale de `FAST_API_BUS_REGISTER` y la
+fecha del reloj del equipo en `America/Guayaquil`. **Ninguna credencial del
+backend remoto llega jamas al frontend**: `FAST_API_BACKEND_URL`, `..._USERNAME`
+y `..._PASSWORD` viven solo en el `.env` del equipo.
+
+### Contrato
+
+```json
+{
+  "status": "updated",
+  "detail": "Itinerario actualizado: 2 recorrido(s)",
+  "date": "2026-09-17",
+  "register": 1624,
+  "dispatch": { "id": 1, "date": "...", "register": 1624, "data": [ ... ], "revision": 4, "created_at": "..." },
+  "preserved_reports": 1,
+  "revision": 4
+}
+```
+
+| `status` | Significado | ¿Cambia el itinerario? |
+|---|---|---|
+| `updated` | Itinerario nuevo descargado, validado y guardado | Si |
+| `empty` | El backend respondio bien y el bus **no trabaja hoy** | Si, queda vacio |
+| `auth_error` | El backend remoto rechazo las credenciales del equipo | **No** |
+| `remote_error` | No se pudo hablar con el backend remoto | **No** |
+| `invalid` | El backend respondio algo inutilizable | **No** |
+| `save_error` | Se descargo bien pero no se pudo guardar | **No** |
+
+En los cuatro estados de error se **conserva el itinerario anterior** y se
+devuelve tal cual en `dispatch`: un fallo de red no puede dejar al conductor sin
+recorrido. `preserved_reports` cuenta las marcaciones locales que se conservaron
+al fusionar.
+
+### Una lista con basura NO es un dia sin despachos
+
+`services/dispatch_refresh.py` valida antes de reemplazar nada: cada recorrido
+necesita numero, horario `HH:MM:SS` en rango y al menos un punto de control con
+id y coordenadas utilizables. Una lista **vacia** es valida y produce `empty`;
+una lista **con contenido roto** produce `invalid` y no borra nada. Confundirlas
+vaciaria el itinerario del conductor a mitad de jornada por un error del backend.
+
+Para distinguir los cuatro casos hizo falta un metodo nuevo en el cliente
+remoto: `ApiService.fetch_dispatch()` devuelve un `DispatchFetch` con estado
+explicito (`ok` / `empty` / `auth_error` / `transport_error` /
+`invalid_response`). `get_dispatch()` se conserva sin cambios para
+`bus_monitor.load_all_dispatches`, que solo necesita saber si hay trabajo hoy.
+
+### Marcaciones locales pendientes
+
+El bus pudo cruzar geocercas mientras la descarga estaba en curso, y esas
+llegadas todavia no estan en el backend remoto. Al fusionar:
+
+* Se conservan **solo las pendientes de subir** (filas de `checkpoint` con
+  `upload = False`). Una que ya viajo al servidor es el servidor quien debe
+  devolverla; resucitarla aqui desharia una correccion hecha en el backend.
+* La identidad es **`(numero de step, id de checkpoint)`**, nunca la posicion en
+  el array: el backend puede reordenar los recorridos o devolver uno menos, y una
+  fusion por indice trasladaria una llegada a **otro recorrido**.
+* Si el itinerario nuevo no tiene ese par exacto, la marcacion se **descarta y se
+  registra en el log**. No se traslada a ninguna parte.
+* Si el itinerario nuevo ya trae hora para ese checkpoint, gana el servidor.
+
+### Concurrencia
+
+La lectura del despacho anterior, la fusion y la escritura ocurren en **una sola
+transaccion** (`crud.refresh_dispatch`), que relee la fila justo antes de
+escribir. Asi una marcacion que entre por `PATCH /api/dispatch/checkpoint`
+mientras la descarga estaba en curso ya esta presente y no se pierde. La ventana
+se cierra a nivel de base de datos, no con un candado en memoria — que no
+cruzaria entre procesos.
+
+Ademas, `POST /api/dispatch` (el cache que escribe el monitor) **ya no reemplaza
+`data` a secas**: conserva las horas de llegada que el payload entrante no trae.
+Ese era un fallo real del upsert anterior — una recarga rutinaria del monitor
+borraba de la pantalla marcaciones que el backend remoto aun no conocia.
+
+---
+
+## Coordinacion con simtra-bus-monitor
+
+FastAPI, el monitor y el loader son **unidades systemd separadas**: procesos
+distintos, sin memoria compartida. Importar `bus_monitor` desde `main.py` para
+tocar sus variables globales **no afectaria al proceso real** — crearia una copia
+del modulo dentro de uvicorn. La coordinacion pasa por la base de datos.
+
+### Mecanismo: revision + evento
+
+1. La tabla `dispatch` tiene una columna **`revision`** que se incrementa en cada
+   escritura.
+2. Tras una recarga exitosa, la API publica un evento `dispatch_refreshed` en
+   `/api/events` con `{date, register, revision, steps, checkpoints}`.
+3. El watcher del monitor consulta ese canal de forma incremental (`after_id`) en
+   cada ciclo y, al ver una revision mas nueva, **lee el despacho ya GUARDADO**
+   con `GET /api/dispatch` y lo adopta. No vuelve a bajarlo del backend remoto:
+   asi monitor y pantalla no pueden discrepar.
+4. Al adoptar, **sustituye** la ventana de geocercas observadas (anterior +
+   actual + siguiente del itinerario nuevo) y recalcula el contexto temporal.
+
+### Que NO se rompe al adoptar
+
+| Garantia | Como |
+|---|---|
+| No se repiten avisos de llegada | No se llama a `reset_daily_state()`: `CONFIRMED_CHECKPOINTS` sobrevive, asi que un checkpoint ya reportado hoy no se vuelve a reportar |
+| Estar dentro de una geocerca no se relee como entrada | `GeofenceMonitor.replace_geofences()` conserva el estado `_active` de las geocercas que siguen vigentes, en vez de crear un monitor nuevo |
+| Las geocercas cambian aunque siga el mismo tramo | Se **reemplaza** la ventana, no se amplia: las paradas que ya no existen dejan de observarse |
+| Una carga vieja del monitor no pisa la recarga | El monitor lee la revision ANTES de salir a la red y la declara como `base_revision` al cachear; si la almacenada es mas nueva, la API descarta esa escritura |
+
+### Tiempo de adopcion
+
+El monitor adopta la revision nueva en **hasta `FAST_API_WATCHER_INTERVAL_SECONDS`
+(10 s por defecto)**. La pantalla, en cambio, se actualiza de inmediato: la
+respuesta del endpoint ya trae el itinerario guardado.
+
+Durante esa ventana, la pantalla muestra el itinerario nuevo y el monitor todavia
+vigila las geocercas del anterior.
+
+> **Si `simtra-bus-monitor` esta detenido, no adopta nada.** La recarga habra
+> actualizado la pantalla y la base de datos, pero el geofencing seguira parado
+> hasta que el servicio vuelva. Comprobar con
+> `systemctl status simtra-bus-monitor` y buscar `[REFRESH]` en `bus_monitor.log`.
 
 ---
 
