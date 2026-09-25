@@ -1,8 +1,14 @@
 """
-Cliente del backend remoto: timeouts, formas inesperadas, reintento por 401 y
-el resultado EXPLÍCITO que necesita la recarga manual del itinerario.
+Cliente del backend remoto: solo device-api con X-API-Key.
+
+Rutas, métodos, cabeceras y códigos verificados contra
+buslytics-backend/src/modules/device-api/device-api.controller.ts (prefijo
+global `api`). No hay login, JWT ni rutas antiguas: si alguna prueba ve una
+cabecera Authorization o una URL fuera de /api/device-api, la migración se
+rompió.
 """
 
+import logging
 import unittest
 
 import _bootstrap  # noqa: F401
@@ -11,8 +17,13 @@ import requests
 
 from api import (
     ApiService, DEFAULT_TIMEOUT,
-    FETCH_OK, FETCH_EMPTY, FETCH_AUTH_ERROR, FETCH_TRANSPORT, FETCH_INVALID,
+    FETCH_OK, FETCH_EMPTY, FETCH_AUTH_ERROR, FETCH_CONFIG_ERROR, FETCH_TRANSPORT, FETCH_INVALID,
+    SEND_OK, SEND_CONFLICT, SEND_REJECTED, SEND_AUTH_ERROR, SEND_CONFIG_ERROR,
+    SEND_NOT_FOUND, SEND_RETRY,
 )
+
+API_KEY = "bl_dev_SECRETA_de_prueba"
+BASE = "https://api.example.com"
 
 
 class FakeResponse:
@@ -29,290 +40,244 @@ class FakeResponse:
 
 
 class FakeSession:
-    """Registra cada llamada; devuelve respuestas de una cola por método."""
+    """Registra cada llamada; devuelve respuestas de una cola."""
 
-    def __init__(self, request_responses=None, post_responses=None):
-        self.request_responses = list(request_responses or [])
-        self.post_responses = list(post_responses or [])
+    def __init__(self, responses=None):
+        self.responses = list(responses or [])
         self.requests = []
-        self.posts = []
 
-    def request(self, method, url, json=None, headers=None, timeout=None):
+    def request(self, method, url, json=None, headers=None, timeout=None, params=None):
         self.requests.append({"method": method, "url": url, "json": json,
-                              "headers": headers, "timeout": timeout})
-        if not self.request_responses:
+                              "headers": headers, "timeout": timeout, "params": params})
+        if not self.responses:
             raise AssertionError(f"llamada inesperada: {method} {url}")
-        response = self.request_responses.pop(0)
+        response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
         return response
 
-    def post(self, url, json=None, headers=None, timeout=None):
-        self.posts.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
-        if not self.post_responses:
-            raise AssertionError(f"login inesperado: {url}")
-        response = self.post_responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        return response
+    def post(self, *args, **kwargs):              # pragma: no cover
+        raise AssertionError("device-api no hace login: no debe haber POST de autenticación")
 
 
-def login_ok(token="TOKEN-1"):
-    return FakeResponse(200, {"result": {"token": token}})
-
-
-def build(request_responses=None, post_responses=None):
-    service = ApiService("https://api.example.com", "user@example.com", "secreto")
-    session = FakeSession(request_responses, post_responses)
+def build(responses=None, api_key=API_KEY, url=BASE):
+    service = ApiService(url, api_key)
+    session = FakeSession(responses)
     service._session = session
     return service, session
 
 
+def no_dispatch_404(register=1624, date="2026-08-25"):
+    """Cuerpo real de AllExceptionsFilter para getByRegisterAndDate sin filas."""
+    return FakeResponse(404, {
+        "statusCode": 404,
+        "message": f"No dispatch found for vehicle {register} on date {date}",
+        "error": "Not Found",
+        "timestamp": "2026-08-25T12:00:00.000Z",
+        "path": f"/api/device-api/dispatch/{register}?date={date}",
+    })
+
+
 class ConstructorTest(unittest.TestCase):
+    def test_solo_url_y_api_key(self):
+        service = ApiService(BASE + "/", API_KEY)
+        self.assertEqual(service.api_url, BASE)
+        self.assertEqual(service.device_api_key, API_KEY)
+        self.assertFalse(hasattr(service, "jwt"))
+        self.assertFalse(hasattr(service, "get_jwt"))
+
     def test_no_hace_red_al_construir(self):
-        """Antes el constructor pedía el token: sin señal, el import se colgaba."""
         service, session = build()
-        self.assertEqual(service.jwt, "")
-        self.assertEqual(session.posts, [])
         self.assertEqual(session.requests, [])
 
-    def test_url_sin_barra_final(self):
-        service = ApiService("https://api.example.com/", "u", "p")
-        self.assertEqual(service.api_url, "https://api.example.com")
-
-    def test_sin_url_no_lanza(self):
-        service = ApiService(None, None, None)
-        self.assertEqual(service.get_dispatch(1, "2026-08-25"), [])
-        self.assertIsNone(service.get_vehicle(1))
-        self.assertFalse(service.post_passenger({}))
-        self.assertFalse(service.update_dispatch({}))
-
-
-class TimeoutTest(unittest.TestCase):
-    def test_toda_solicitud_lleva_timeout(self):
-        service, session = build(
-            request_responses=[FakeResponse(200, {"result": []})],
-            post_responses=[login_ok()],
-        )
-        service.get_dispatch(1624, "2026-08-25")
-
-        self.assertTrue(session.posts and session.requests)
-        for call in session.posts + session.requests:
-            self.assertEqual(call["timeout"], DEFAULT_TIMEOUT)
+    def test_sin_url_ni_clave_no_lanza_ni_toca_la_red(self):
+        for url, key, expected in ((None, API_KEY, "FAST_API_BACKEND_URL"),
+                                   (BASE, None, "FAST_API_DEVICE_API_KEY"),
+                                   (BASE, "   ", "FAST_API_DEVICE_API_KEY")):
+            with self.subTest(url=url, key=key):
+                service, session = build(api_key=key, url=url)
+                self.assertIn(expected, service.configuration_error())
+                self.assertEqual(service.fetch_dispatch(1, "2026-08-25").status, FETCH_CONFIG_ERROR)
+                self.assertEqual(service.post_gps({}, 1).status, SEND_CONFIG_ERROR)
+                self.assertEqual(service.post_passenger({}).status, SEND_CONFIG_ERROR)
+                self.assertEqual(service.update_dispatch({}, 1).status, SEND_CONFIG_ERROR)
+                self.assertEqual(session.requests, [])
 
 
-class RetryOn401Test(unittest.TestCase):
-    def test_renueva_token_y_reintenta_una_vez(self):
-        service, session = build(
-            request_responses=[FakeResponse(401), FakeResponse(200, {"result": [{"step": 1}]})],
-            post_responses=[login_ok("VIEJO"), login_ok("NUEVO")],
-        )
-        result = service.get_dispatch(1624, "2026-08-25")
+class DeviceApiRoutesTest(unittest.TestCase):
+    """Ruta, método, cabeceras y cuerpo de cada operación."""
 
-        self.assertEqual(result, [{"step": 1}])
-        self.assertEqual(len(session.requests), 2)          # original + un reintento
-        self.assertEqual(service.jwt, "NUEVO")
-        self.assertIn("NUEVO", session.requests[1]["headers"]["Authorization"])
+    def assert_device_call(self, call, method, path):
+        self.assertEqual(call["method"], method)
+        self.assertEqual(call["url"], BASE + path)
+        self.assertEqual(call["headers"]["X-API-Key"], API_KEY)
+        self.assertNotIn("Authorization", call["headers"])
+        self.assertEqual(call["timeout"], DEFAULT_TIMEOUT)
+        self.assertNotIn(API_KEY, call["url"])
 
-    def test_no_reintenta_indefinidamente(self):
-        """Un 401 persistente no puede convertirse en un bucle de autenticación."""
-        service, session = build(
-            request_responses=[FakeResponse(401), FakeResponse(401)],
-            post_responses=[login_ok(), login_ok()],
-        )
-        self.assertEqual(service.get_dispatch(1624, "2026-08-25"), [])
-        self.assertEqual(len(session.requests), 2)
-        self.assertEqual(len(session.posts), 2)
+    def test_fetch_dispatch(self):
+        service, session = build([FakeResponse(200, {"result": [{"step": 1}]})])
+        service.fetch_dispatch(1624, "2026-08-25")
+        call = session.requests[0]
+        self.assert_device_call(call, "GET", "/api/device-api/dispatch/1624")
+        self.assertEqual(call["params"], {"date": "2026-08-25"})
 
-    def test_si_el_login_falla_no_reintenta(self):
-        service, session = build(
-            request_responses=[FakeResponse(401)],
-            post_responses=[login_ok(), FakeResponse(500)],
-        )
-        self.assertEqual(service.get_dispatch(1624, "2026-08-25"), [])
-        self.assertEqual(len(session.requests), 1)
+    def test_post_gps(self):
+        body = {"timestamp": 1787659200, "latitude": -4.0, "longitude": -79.0, "speed": 8.0}
+        service, session = build([FakeResponse(201)])
+        self.assertTrue(service.post_gps(body, 1624))
+        self.assert_device_call(session.requests[0], "POST", "/api/device-api/gps/1624")
+        self.assertEqual(session.requests[0]["json"], body)
 
-    def test_login_sin_token_utilizable(self):
-        for payload in (None, {}, {"result": None}, {"result": {}}, {"result": {"token": ""}},
-                        {"result": "texto"}):
-            with self.subTest(payload=payload):
-                service, _ = build(post_responses=[FakeResponse(200, payload)])
-                self.assertEqual(service.get_jwt(), "")
+    def test_post_passenger(self):
+        body = {"register": 1624, "timestamp": "2026-08-25T07:00:00-05:00",
+                "latitude": -4.0, "longitude": -79.0}
+        service, session = build([FakeResponse(201)])
+        self.assertTrue(service.post_passenger(body))
+        self.assert_device_call(session.requests[0], "POST", "/api/device-api/passenger")
 
-    def test_login_con_error_de_red(self):
-        service, _ = build(post_responses=[requests.ConnectionError("sin red")])
-        self.assertEqual(service.get_jwt(), "")
+    def test_update_dispatch_lleva_register_en_la_ruta(self):
+        body = {"id": 3701, "time_reported": "06:10:00"}
+        service, session = build([FakeResponse(200)])
+        self.assertTrue(service.update_dispatch(body, 1624))
+        self.assert_device_call(session.requests[0], "PATCH", "/api/device-api/dispatch/1624")
+        self.assertEqual(session.requests[0]["json"], body)
+
+    def test_get_vehicle_bloqueado_sin_red(self):
+        """device-api no tiene ruta de vehículo: no se inventa ni se usa la antigua."""
+        service, session = build()
+        self.assertIsNone(service.get_vehicle(1624))
+        self.assertIsNone(service.get_vehicle(1624))
+        self.assertEqual(session.requests, [])
 
 
-class ResponseShapeTest(unittest.TestCase):
-    def test_get_dispatch_siempre_lista(self):
-        casos = [
-            FakeResponse(200, {"result": None}),
-            FakeResponse(200, {"result": {"step": 1}}),
-            FakeResponse(200, {"result": "texto"}),
-            FakeResponse(200, {}),                    # sin 'result'
-            FakeResponse(200, ["a", "b"]),            # envoltura inesperada
-            FakeResponse(200, raise_json=True),       # no es JSON
-            FakeResponse(500, {"result": []}),
-        ]
-        for response in casos:
-            with self.subTest(response=response.status_code):
-                service, _ = build(request_responses=[response], post_responses=[login_ok()])
-                self.assertEqual(service.get_dispatch(1624, "2026-08-25"), [])
+class SendResultTest(unittest.TestCase):
+    def check(self, method, status, expected, ok_status):
+        service, _ = build([FakeResponse(status)])
+        result = method(service)
+        self.assertEqual(result.status, expected, f"HTTP {status}")
+        self.assertEqual(bool(result), expected == SEND_OK)
+        if status != ok_status:
+            self.assertEqual(result.http_status, status)
 
-    def test_get_dispatch_devuelve_la_lista(self):
-        service, _ = build(
-            request_responses=[FakeResponse(200, {"result": [{"step": 0}, {"step": 1}]})],
-            post_responses=[login_ok()],
-        )
-        self.assertEqual(len(service.get_dispatch(1624, "2026-08-25")), 2)
+    def test_post_gps_solo_ok_con_201(self):
+        cases = {201: SEND_OK, 200: SEND_RETRY, 400: SEND_REJECTED, 401: SEND_AUTH_ERROR,
+                 403: SEND_AUTH_ERROR, 404: SEND_NOT_FOUND, 429: SEND_RETRY, 500: SEND_RETRY,
+                 503: SEND_RETRY}
+        for status, expected in cases.items():
+            with self.subTest(status=status):
+                self.check(lambda s: s.post_gps({"timestamp": 1}, 1624), status, expected, 201)
 
-    def test_get_vehicle_solo_acepta_objeto(self):
-        for payload in ({"result": None}, {"result": []}, {"result": "x"}, {}):
-            with self.subTest(payload=payload):
-                service, _ = build(request_responses=[FakeResponse(200, payload)],
-                                   post_responses=[login_ok()])
-                self.assertIsNone(service.get_vehicle(1624))
+    def test_post_passenger_solo_ok_con_201(self):
+        for status, expected in {201: SEND_OK, 200: SEND_RETRY, 400: SEND_REJECTED,
+                                 401: SEND_AUTH_ERROR, 500: SEND_RETRY}.items():
+            with self.subTest(status=status):
+                self.check(lambda s: s.post_passenger({"a": 1}), status, expected, 201)
 
-        service, _ = build(request_responses=[FakeResponse(200, {"result": {"plate": "ABC"}})],
-                           post_responses=[login_ok()])
-        self.assertEqual(service.get_vehicle(1624), {"plate": "ABC"})
+    def test_update_dispatch_200_ok_409_conflicto(self):
+        for status, expected in {200: SEND_OK, 201: SEND_RETRY, 409: SEND_CONFLICT,
+                                 404: SEND_NOT_FOUND, 403: SEND_AUTH_ERROR, 500: SEND_RETRY}.items():
+            with self.subTest(status=status):
+                self.check(lambda s: s.update_dispatch({"id": 1}, 1624), status, expected, 200)
 
     def test_errores_de_red_no_se_propagan(self):
-        for error in (requests.ConnectionError("x"), requests.Timeout("y")):
+        for error in (requests.ConnectionError("sin señal"), requests.Timeout("lento")):
             with self.subTest(error=type(error).__name__):
-                service, _ = build(request_responses=[error], post_responses=[login_ok()])
-                self.assertEqual(service.get_dispatch(1624, "2026-08-25"), [])
+                service, _ = build([error])
+                result = service.post_gps({}, 1624)
+                self.assertEqual(result.status, SEND_RETRY)
+                self.assertTrue(result.stops_queue)
 
-    def test_post_passenger_solo_true_con_201(self):
-        for status, expected in ((201, True), (200, False), (400, False), (500, False)):
-            with self.subTest(status=status):
-                service, _ = build(request_responses=[FakeResponse(status)],
-                                   post_responses=[login_ok()])
-                self.assertIs(service.post_passenger({"a": 1}), expected)
-
-    def test_update_dispatch_solo_true_con_200(self):
-        for status, expected in ((200, True), (204, False), (500, False)):
-            with self.subTest(status=status):
-                service, _ = build(request_responses=[FakeResponse(status)],
-                                   post_responses=[login_ok()])
-                self.assertIs(service.update_dispatch({"id": 1}), expected)
-
-
-class CredentialsTest(unittest.TestCase):
-    def test_la_contrasena_no_aparece_en_los_logs(self):
-        import logging
-
-        logging.disable(logging.NOTSET)
-        self.addCleanup(lambda: logging.disable(logging.CRITICAL))
-
-        service, _ = build(post_responses=[FakeResponse(401)])
-        with self.assertLogs("simtra", level="DEBUG") as captured:
-            service.get_jwt()
-
-        registrado = "\n".join(captured.output)
-        self.assertNotIn("secreto", registrado)
-        self.assertNotIn("user@example.com", registrado)
+    def test_stops_queue(self):
+        service, _ = build([FakeResponse(400), FakeResponse(404), FakeResponse(401)])
+        self.assertFalse(service.post_gps({}, 1).stops_queue)
+        self.assertFalse(service.post_gps({}, 1).stops_queue)
+        self.assertTrue(service.post_gps({}, 1).stops_queue)
 
 
 class FetchDispatchTest(unittest.TestCase):
-    """
-    `get_dispatch` devuelve [] tanto si el bus no trabaja hoy como si la red
-    falló, y para la pantalla esas dos cosas son opuestas: una debe vaciar el
-    itinerario y la otra no debe tocarlo. `fetch_dispatch` las separa.
-    """
+    """Un día sin despachos vacía el itinerario; un error NO debe tocarlo."""
 
     def test_respuesta_con_despachos(self):
-        service, _ = build(
-            request_responses=[FakeResponse(200, {"result": [{"step": 1}]})],
-            post_responses=[login_ok()],
-        )
+        service, _ = build([FakeResponse(200, {"statusCode": 200, "result": [{"step": 1}]})])
         result = service.fetch_dispatch(1624, "2026-08-25")
-
         self.assertEqual(result.status, FETCH_OK)
         self.assertEqual(result.dispatches, [{"step": 1}])
         self.assertTrue(result.ok)
 
-    def test_dia_sin_despachos_es_una_respuesta_valida(self):
-        service, _ = build(
-            request_responses=[FakeResponse(200, {"result": []})],
-            post_responses=[login_ok()],
-        )
+    def test_404_no_dispatch_found_es_dia_vacio(self):
+        """Contrato real: getByRegisterAndDate lanza NotFound si no hay filas."""
+        service, _ = build([no_dispatch_404()])
         result = service.fetch_dispatch(1624, "2026-08-25")
-
         self.assertEqual(result.status, FETCH_EMPTY)
+        self.assertTrue(result.ok)
         self.assertEqual(result.dispatches, [])
-        self.assertTrue(result.ok)   # válida, aunque vacía
+
+    def test_200_con_lista_vacia_tambien_es_dia_vacio(self):
+        service, _ = build([FakeResponse(200, {"result": []})])
+        self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_EMPTY)
+
+    def test_otro_404_no_es_dia_vacio(self):
+        casos = [
+            FakeResponse(404, {"statusCode": 404, "message": "Cannot GET /api/device-api/dispatch/1624",
+                               "error": "Not Found"}),
+            FakeResponse(404, raise_json=True, text="<html>"),
+            FakeResponse(404, {"message": ["x"]}),
+        ]
+        for response in casos:
+            with self.subTest(payload=response._payload):
+                service, _ = build([response])
+                self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_TRANSPORT)
 
     def test_fallo_de_red_no_es_un_dia_vacio(self):
-        service, _ = build(
-            request_responses=[requests.ConnectionError("sin señal")],
-            post_responses=[login_ok()],
-        )
+        service, _ = build([requests.ConnectionError("sin señal")])
         result = service.fetch_dispatch(1624, "2026-08-25")
-
         self.assertEqual(result.status, FETCH_TRANSPORT)
         self.assertFalse(result.ok)
-        self.assertEqual(result.dispatches, [])
 
-    def test_credenciales_rechazadas(self):
-        """401 que sobrevive al reintento: no es un problema de red."""
-        service, _ = build(
-            request_responses=[FakeResponse(401), FakeResponse(401)],
-            post_responses=[login_ok(), login_ok()],
-        )
-        self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_AUTH_ERROR)
-
-    def test_login_fallido_tambien_es_error_de_autenticacion(self):
-        service, _ = build(
-            request_responses=[FakeResponse(401)],
-            post_responses=[login_ok(), FakeResponse(500)],
-        )
-        self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_AUTH_ERROR)
-
-    def test_403_tambien_es_error_de_autenticacion(self):
-        service, _ = build(
-            request_responses=[FakeResponse(403)],
-            post_responses=[login_ok()],
-        )
-        self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_AUTH_ERROR)
+    def test_api_key_rechazada_o_bus_ajeno(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                service, session = build([FakeResponse(status)])
+                self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_AUTH_ERROR)
+                self.assertEqual(len(session.requests), 1)   # sin reintento ni login
 
     def test_error_del_servidor_es_de_transporte(self):
-        for code in (500, 502, 404):
+        for code in (500, 502, 429):
             with self.subTest(code=code):
-                service, _ = build(
-                    request_responses=[FakeResponse(code)],
-                    post_responses=[login_ok()],
-                )
-                self.assertEqual(
-                    service.fetch_dispatch(1624, "2026-08-25").status, FETCH_TRANSPORT)
+                service, _ = build([FakeResponse(code)])
+                self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_TRANSPORT)
 
     def test_cuerpo_inutilizable_es_respuesta_invalida(self):
         casos = [
-            FakeResponse(200, {"data": []}),          # sin 'result'
-            FakeResponse(200, {"result": {"a": 1}}),  # 'result' no es lista
+            FakeResponse(200, {"data": []}),
+            FakeResponse(200, {"result": {"a": 1}}),
             FakeResponse(200, "texto suelto"),
             FakeResponse(200, raise_json=True, text="<html>"),
         ]
         for response in casos:
             with self.subTest(response=response._payload):
-                service, _ = build(request_responses=[response], post_responses=[login_ok()])
-                self.assertEqual(
-                    service.fetch_dispatch(1624, "2026-08-25").status, FETCH_INVALID)
+                service, _ = build([response])
+                self.assertEqual(service.fetch_dispatch(1624, "2026-08-25").status, FETCH_INVALID)
 
-    def test_get_dispatch_sigue_siendo_compatible(self):
-        """El consumidor histórico (bus_monitor) no cambia de comportamiento."""
-        service, _ = build(
-            request_responses=[FakeResponse(200, {"result": [{"step": 1}]})],
-            post_responses=[login_ok()],
-        )
-        self.assertEqual(service.get_dispatch(1624, "2026-08-25"), [{"step": 1}])
 
-        service, _ = build(
-            request_responses=[requests.ConnectionError("sin señal")],
-            post_responses=[login_ok()],
-        )
-        self.assertEqual(service.get_dispatch(1624, "2026-08-25"), [])
+class SecretsTest(unittest.TestCase):
+    def test_la_api_key_no_aparece_en_los_logs(self):
+        logging.disable(logging.NOTSET)
+        self.addCleanup(lambda: logging.disable(logging.CRITICAL))
+
+        service, _ = build([
+            FakeResponse(401), requests.ConnectionError(f"{BASE}/api/device-api/gps/1"),
+            FakeResponse(500), FakeResponse(404, raise_json=True, text="x"),
+        ])
+        with self.assertLogs("simtra", level="DEBUG") as captured:
+            service.post_gps({}, 1)
+            service.post_gps({}, 1)
+            service.fetch_dispatch(1, "2026-08-25")
+            service.fetch_dispatch(1, "2026-08-25")
+            service.get_vehicle(1)
+
+        self.assertNotIn(API_KEY, "\n".join(captured.output))
 
 
 if __name__ == "__main__":

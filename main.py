@@ -1,6 +1,7 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -12,14 +13,16 @@ import models
 import database
 from database import engine, SessionLocal
 from schemas import (
-    GPSDataCreate, GPSDataResponse, CheckPointCreate, PassengerCreate, DispatchCreate,
+    GPSDataCreate, GPSDataResponse, GPSPositionResponse, GPSRejectRequest, CheckPointCreate, PassengerCreate, DispatchCreate,
     DispatchResponse, DispatchCheckpointUpdate, DispatchRefreshResponse, EventCreate,
     EventResponse, VehicleCreate, VehicleResponse, NetworkInfoResponse,
     PowerActionResponse, WifiConnectRequest, WifiConnectResponse,
 )
 import crud
 from services import network_info, power, wifi, dispatch_refresh
-from services.api import ApiService, FETCH_OK, FETCH_EMPTY, FETCH_AUTH_ERROR, FETCH_INVALID
+from services.api import (
+    ApiService, FETCH_OK, FETCH_EMPTY, FETCH_AUTH_ERROR, FETCH_CONFIG_ERROR, FETCH_INVALID,
+)
 from datetime import datetime
 
 load_dotenv()
@@ -29,18 +32,16 @@ log = logging.getLogger("simtra")
 ECUADOR_TZ = ZoneInfo("America/Guayaquil")
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Identidad del bus y credenciales del backend remoto. Viven SOLO aquí (y en el
-# monitor y el loader): ninguna llega jamás al frontend, que solo habla con esta
-# API local y nunca con el backend remoto.
+# Identidad del bus y clave del equipo para device-api. Viven SOLO aquí (y en
+# el monitor y el loader): ninguna llega jamás al frontend, que solo habla con
+# esta API local y nunca con el backend remoto.
 BUS_REGISTER = int(os.getenv("FAST_API_BUS_REGISTER") or 0)
 BACKEND_URL = os.getenv("FAST_API_BACKEND_URL")
-BACKEND_USERNAME = os.getenv("FAST_API_BACKEND_USERNAME")
-BACKEND_PASSWORD = os.getenv("FAST_API_BACKEND_PASSWORD")
+DEVICE_API_KEY = os.getenv("FAST_API_DEVICE_API_KEY")
 
-# Cliente del backend remoto, reutilizado entre peticiones para conservar el
-# JWT: pedir un token nuevo en cada recarga sería una llamada de red extra en la
-# red del bus. El token se renueva solo (ver services/api.py).
-remote_api = ApiService(BACKEND_URL, BACKEND_USERNAME, BACKEND_PASSWORD)
+# Cliente del backend remoto (solo /api/device-api/* con X-API-Key), reutilizado
+# entre peticiones para conservar la conexión HTTP.
+remote_api = ApiService(BACKEND_URL, DEVICE_API_KEY)
 
 # Origenes permitidos para la pantalla del bus (bus-display), que corre en el
 # mismo dispositivo pero en otro puerto -> es cross-origin para el navegador.
@@ -53,13 +54,27 @@ CORS_ORIGINS = [
 ]
 
 models.Base.metadata.create_all(bind=engine)
-# Columnas agregadas después de la primera puesta en marcha (hoy:
-# dispatch.revision). En una RPi que ya lleva meses corriendo, create_all no
+# Columnas agregadas después de la primera puesta en marcha (dispatch.revision,
+# cola GPS). En una RPi que ya lleva meses corriendo, create_all no
 # toca una tabla existente y sin esto el servicio arrancaría para fallar en la
 # primera consulta.
 for column in database.ensure_schema(engine):
     log.warning("[SCHEMA] Columna agregada: %s", column)
 app = FastAPI(title="SIMTRA TRACKING API")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_without_input(request, exc: RequestValidationError):
+    """
+    422 sin el valor recibido. El manejador por defecto lo devuelve, y un NaN o
+    infinito en el cuerpo (p. ej. un receptor GPS sin fix) hacía fallar la
+    serialización JSON del propio error: la lectura acababa en un 500.
+    """
+    errors = [
+        {"loc": list(e.get("loc", ())), "msg": str(e.get("msg", "")), "type": str(e.get("type", ""))}
+        for e in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 app.add_middleware(
     CORSMiddleware,
@@ -79,7 +94,7 @@ def get_db():
 
 #endpoints gps
 
-@app.post("/api/gps", response_model=GPSDataResponse)
+@app.post("/api/gps", response_model=Optional[GPSDataResponse])
 def create_gps(data: GPSDataCreate, db: Session = Depends(get_db)):
     return crud.create_gps_data(db, data)
 
@@ -89,9 +104,34 @@ def read_gps(db: Session = Depends(get_db)):
     return crud.get_all_gps(db)
 
 
-@app.get("/api/gps/last_position", response_model=Optional[GPSDataResponse])
+@app.get("/api/gps/last_position", response_model=Optional[GPSPositionResponse])
 def read_last_position(db: Session = Depends(get_db)):   # nombre corregido
     return crud.get_last_position(db)
+
+
+@app.get("/api/gps/pending", response_model=list[GPSDataResponse])
+def get_pending_gps(
+    limit: int = Query(100, ge=1, le=crud.MAX_PENDING_GPS),
+    db: Session = Depends(get_db),
+):
+    return crud.get_pending_gps(db, limit=limit)
+
+
+@app.patch("/api/gps/{id}", response_model=GPSDataResponse)
+def update_status_gps(id: int, db: Session = Depends(get_db)):
+    gps = crud.upload_pending_gps(db, id=id)
+    if gps is None:
+        raise HTTPException(status_code=404, detail="Punto GPS no encontrado")
+    return gps
+
+
+@app.post("/api/gps/{id}/reject", response_model=GPSDataResponse)
+def reject_gps(id: int, data: GPSRejectRequest, db: Session = Depends(get_db)):
+    """Saca de la cola un punto que no se subirá nunca (no lo marca subido)."""
+    gps = crud.reject_pending_gps(db, id=id, reason=data.reason)
+    if gps is None:
+        raise HTTPException(status_code=404, detail="Punto GPS no encontrado")
+    return gps
 
 
 #endpoints checkpoints
@@ -189,15 +229,15 @@ def refresh_dispatch(db: Session = Depends(get_db)):
         -> respuesta con el despacho guardado -> evento para el monitor
 
     Sin cuerpo: el registro sale de FAST_API_BUS_REGISTER y la fecha del reloj
-    en America/Guayaquil. Las credenciales del backend remoto viven en el .env
-    del equipo y NUNCA llegan al frontend.
+    en America/Guayaquil. La API key del equipo (device-api) vive en el .env
+    y NUNCA llega al frontend.
 
     Contrato de la respuesta (DispatchRefreshResponse):
 
         status "updated"      -> itinerario nuevo guardado
                "empty"        -> el backend respondio bien y el bus NO trabaja
                                  hoy; el itinerario queda vacio a proposito
-               "auth_error"   -> credenciales rechazadas por el backend remoto
+               "auth_error"   -> API key ausente o rechazada por el backend remoto
                "remote_error" -> no se pudo hablar con el backend remoto
                "invalid"      -> respondio algo inutilizable
                "save_error"   -> se descargo bien pero no se pudo guardar
@@ -227,10 +267,18 @@ def refresh_dispatch(db: Session = Depends(get_db)):
 
     fetched = remote_api.fetch_dispatch(BUS_REGISTER, date)
 
+    if fetched.status == FETCH_CONFIG_ERROR:
+        # Sin clave no hay forma de autenticarse: para la pantalla es un
+        # problema de credenciales, con un texto que dice qué falta.
+        return _empty_refresh(
+            "auth_error",
+            "Este equipo no tiene configurada su clave de acceso a SIMTRA",
+            date, current,
+        )
     if fetched.status == FETCH_AUTH_ERROR:
         return _empty_refresh(
             "auth_error",
-            "El servidor de SIMTRA rechazó las credenciales de este equipo",
+            "El servidor de SIMTRA rechazó la clave de acceso de este equipo",
             date, current,
         )
     if fetched.status == FETCH_INVALID:

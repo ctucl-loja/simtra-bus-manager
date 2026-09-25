@@ -9,6 +9,39 @@ class Gps(Base):
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     speed = Column(Float, nullable=True)
+    # Cola de subida (simtra-bus-loader). Solo contiene puntos de TRAZA: los
+    # que superaron el filtro local (velocidad distinta de 0 y >= 5 m del
+    # último punto aceptado). La posición actual vive en `gps_current`.
+    upload = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Instante absoluto (Unix, segundos) calculado al recibir el punto. SQLite
+    # guarda `timestamp` sin zona horaria, así que reinterpretarlo después
+    # podría desplazarlo 5 h; este valor es el que se sube a device-api.
+    # Null en filas anteriores a la migración.
+    timestamp_unix = Column(Integer, nullable=True)
+    # Motivo por el que el punto no se subirá nunca (el backend lo rechazó con
+    # 400 o el registro local es inutilizable). Con valor, sale de la cola sin
+    # bloquear a los siguientes y sin marcarse como subido.
+    upload_error = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class GpsCurrent(Base):
+    """
+    Última lectura GPS VÁLIDA recibida, se haya archivado como traza o no.
+
+    Una sola fila (id = 1). Existe porque la tabla `gps` filtra (velocidad 0,
+    menos de 5 m): si la posición actual saliera de ahí, un bus detenido en una
+    parada quedaría "congelado" en el último punto en movimiento, y el monitor
+    de geocercas, las pantallas y los pasajeros verían una posición vieja.
+    """
+    __tablename__ = "gps_current"
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    speed = Column(Float, nullable=True)
+    # Fila de `gps` en la que se archivó esta lectura; null si se descartó.
+    trace_id = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -74,5 +107,4 @@ class Passenger(Base):
     longitude = Column(Float, nullable=False)
     upload = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
 

@@ -235,7 +235,7 @@ async function insertGpsPoint(lat, lon) {
     const body = {
         latitude: lat,
         longitude: lon,
-        speed: 0,                        // sin dato real de velocidad; nunca null (bus_monitor no lo tolera)
+        speed: 1,                        // punto manual de prueba; con 0 movería la posición actual pero no entraría en la traza
         timestamp: new Date().toISOString(),
     };
 

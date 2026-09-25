@@ -1,4 +1,4 @@
-from api import ApiService
+from api import ApiService, FETCH_EMPTY
 import audio_announcer
 from datetime import datetime
 from dataclasses import dataclass
@@ -84,8 +84,7 @@ POLL_INTERVAL_SECONDS = int_env("FAST_API_POLL_INTERVAL_SECONDS", 2)
 WATCHER_INTERVAL_SECONDS = int_env("FAST_API_WATCHER_INTERVAL_SECONDS", 10)  # el watcher evalúa si el turno cambió
 LOCAL_BACKEND = os.getenv("FAST_API_LOCAL_BACKEND") or "http://127.0.0.1:8000"
 BACKEND_URL = os.getenv("FAST_API_BACKEND_URL")
-BACKEND_USERNAME = os.getenv("FAST_API_BACKEND_USERNAME")
-BACKEND_PASSWORD = os.getenv("FAST_API_BACKEND_PASSWORD")
+DEVICE_API_KEY = os.getenv("FAST_API_DEVICE_API_KEY")
 BUS_REGISTER = int_env("FAST_API_BUS_REGISTER", 0)
 
 # Reintento de consulta de despachos cuando el bus arranca sin ninguno (reserva,
@@ -113,7 +112,7 @@ ON_TIME_TOLERANCE_SECONDS = 30
 # API - CLIENT
 # ─────────────────────────────────────────────
 
-simtra = ApiService(BACKEND_URL, BACKEND_USERNAME, BACKEND_PASSWORD)
+simtra = ApiService(BACKEND_URL, DEVICE_API_KEY)
 
 
 # ─────────────────────────────────────────────
@@ -542,9 +541,13 @@ def reset_daily_state():
 
 def load_all_dispatches(date: Optional[str] = None) -> bool:
     """
-    Carga todos los despachos del día desde la API de Simtra.
+    Carga todos los despachos del día desde la API de Simtra (device-api).
     Devuelve True si hay despachos, False si el bus no trabaja hoy
-    (reserva, mantenimiento, o error de red).
+    (reserva, mantenimiento) o si la consulta falló.
+
+    Solo una respuesta VÁLIDA sin despachos vacía el itinerario en memoria. Un
+    error de red, de API key o una respuesta inutilizable lo deja como estaba:
+    no son información sobre el día.
     """
     global ALL_DISPATCHES
 
@@ -558,16 +561,21 @@ def load_all_dispatches(date: Optional[str] = None) -> bool:
     base_revision = read_local_revision(query_date)
 
     try:
-        dispatches = simtra.get_dispatch(BUS_REGISTER, query_date)
+        fetched = simtra.fetch_dispatch(BUS_REGISTER, query_date)
     except Exception as e:
         # Barrera: el cliente ya no debería lanzar, pero esto corre en el hilo
         # watcher y una excepción aquí lo mataría para el resto del día.
         log.exception(f"Error consultando despachos: {e}")
         return False
 
+    if not fetched.ok:
+        log.error(f"No se pudieron consultar los despachos ({fetched.status}) — se conserva lo cargado")
+        return False
+
+    dispatches = fetched.dispatches if fetched.status != FETCH_EMPTY else []
     if not isinstance(dispatches, list):
         log.error(f"Despachos con forma inesperada ({type(dispatches).__name__}) — se ignoran")
-        dispatches = []
+        return False
 
     # Solo cuentan los steps con horario utilizable: uno sin ventana temporal no
     # puede autorizar marcaciones, así que tampoco debe hacer creer que el bus
@@ -603,10 +611,13 @@ def sync_vehicle_info():
     Descarga la información del vehículo asociado al bus (vía services/api.py,
     nunca con requests directo al backend remoto) y la cachea en el backend
     local, igual que se hace con el despacho.
+
+    Hoy device-api no expone la ficha del vehículo y `get_vehicle` devuelve
+    None sin tocar la red: la ficha ya cacheada se conserva (no se borra).
     """
     vehicle = simtra.get_vehicle(BUS_REGISTER)
     if not isinstance(vehicle, dict) or not vehicle:
-        log.warning("La API no devolvió información utilizable del vehículo")
+        log.debug("Sin ficha remota del vehículo — se conserva la cacheada")
         return
     cache_vehicle_locally(vehicle)
 

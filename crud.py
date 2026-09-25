@@ -1,23 +1,126 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
+from types import SimpleNamespace
 from typing import Optional
-from models import Gps,CheckPoint,Passenger,Dispatch,Event,Vehicle
+from models import Gps,GpsCurrent,CheckPoint,Passenger,Dispatch,Event,Vehicle
 from schemas import GPSDataCreate,PassengerCreate,DispatchCreate,EventCreate,VehicleCreate
 from datetime import datetime, timezone
 from datetime import datetime,time
 
 from zoneinfo import ZoneInfo
 import logging
+import math
+import threading
 
 log = logging.getLogger("simtra")
 
 ECUADOR_TZ = ZoneInfo("America/Guayaquil")
+MIN_GPS_DISTANCE_METERS = 5.0
 
-def create_gps_data(db: Session, data: GPSDataCreate):
-    gps = Gps(**data.model_dump())
-    db.add(gps)
-    db.commit()
-    db.refresh(gps)
+
+def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    )
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def gps_unix_seconds(value: datetime) -> int:
+    """
+    Instante Unix (segundos) de un timestamp recibido por POST /api/gps.
+
+    Con zona horaria es exacto. Sin zona se interpreta como hora de pared de
+    America/Guayaquil, que es la del equipo (el simulador envía
+    `datetime.now()` sin zona). Se calcula UNA vez, al recibir el punto: lo que
+    se guarda en `gps.timestamp` pierde la zona en SQLite y reinterpretarlo más
+    tarde desplazaría 5 h cualquier punto que llegó en UTC.
+    """
+    aware = value if value.tzinfo else value.replace(tzinfo=ECUADOR_TZ)
+    return int(aware.timestamp())
+
+
+def _last_trace_point(db: Session) -> Optional[Gps]:
+    """Último punto ACEPTADO y persistido en la traza (orden de inserción)."""
+    return db.query(Gps).order_by(Gps.id.desc()).first()
+
+
+def _trace_rejection(previous: Optional[Gps], data: GPSDataCreate) -> Optional[str]:
+    """
+    Motivo por el que la lectura no entra en la traza, o None si entra.
+
+    Velocidad desconocida (null) no es evidencia de movimiento: pasa por el
+    mismo filtro de distancia que cualquier otra lectura.
+    """
+    if data.speed == 0:
+        return "velocidad 0"
+    if previous is None:
+        return None
+    distance = _haversine_meters(
+        previous.latitude, previous.longitude, data.latitude, data.longitude,
+    )
+    if distance < MIN_GPS_DISTANCE_METERS:
+        return f"{distance:.2f} m del último punto aceptado (mínimo {MIN_GPS_DISTANCE_METERS:.0f} m)"
+    return None
+
+
+# Serializa consultar-el-último-punto → decidir → insertar. FastAPI atiende los
+# endpoints síncronos en un pool de hilos: sin esto, dos lecturas casi
+# simultáneas podrían compararse ambas con el mismo "último punto" y archivarse
+# las dos aunque estén a centímetros. La API corre como UN proceso uvicorn
+# (README → systemd); con varios workers haría falta un bloqueo en la base.
+_GPS_WRITE_LOCK = threading.Lock()
+
+
+def create_gps_data(db: Session, data: GPSDataCreate) -> Optional[Gps]:
+    """
+    Registra una lectura GPS válida.
+
+    Siempre actualiza la posición actual (`gps_current`). Solo la archiva en la
+    traza pendiente de subida (`gps`, upload=False) si la velocidad no es 0 y
+    está a 5 m o más del último punto aceptado. Devuelve la fila de traza
+    creada, o None si la lectura se descartó de la traza.
+    """
+    with _GPS_WRITE_LOCK:
+        try:
+            reason = _trace_rejection(_last_trace_point(db), data)
+
+            gps = None
+            if reason is None:
+                gps = Gps(
+                    **data.model_dump(),
+                    upload=False,
+                    timestamp_unix=gps_unix_seconds(data.timestamp),
+                )
+                db.add(gps)
+                db.flush()   # asigna el id para enlazarlo desde gps_current
+            else:
+                log.debug("[GPS] Lectura fuera de la traza: %s", reason)
+
+            current = db.get(GpsCurrent, 1)
+            if current is None:
+                current = GpsCurrent(id=1)
+                db.add(current)
+            current.timestamp = data.timestamp
+            current.latitude = data.latitude
+            current.longitude = data.longitude
+            current.speed = data.speed
+            current.trace_id = gps.id if gps else None
+            current.created_at = datetime.now(timezone.utc)
+
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    if gps is not None:
+        db.refresh(gps)
     return gps
 
 
@@ -26,9 +129,64 @@ def get_all_gps(db: Session):
 
 
 def get_last_position(db: Session):
-    return db.query(Gps)\
-        .order_by(Gps.created_at.desc())\
-        .first()
+    """
+    Posición actual: la última lectura válida recibida, esté o no en la traza.
+
+    En una base anterior a `gps_current` (equipo recién actualizado, todavía
+    sin lecturas nuevas) se cae al último punto de la traza.
+    """
+    current = db.get(GpsCurrent, 1)
+    if current is not None:
+        return {
+            "id": current.trace_id,
+            "latitude": current.latitude,
+            "longitude": current.longitude,
+            "speed": current.speed,
+            "timestamp": current.timestamp,
+            "created_at": current.created_at,
+        }
+    return _last_trace_point(db)
+
+
+# Tope de la cola devuelta por ciclo: el loader procesa por tandas y una
+# jornada sin red puede acumular decenas de miles de puntos.
+MAX_PENDING_GPS = 500
+
+
+def get_pending_gps(db: Session, limit: int = 100):
+    """Puntos de traza por subir, en orden de inserción (determinista)."""
+    limit = max(1, min(int(limit), MAX_PENDING_GPS))
+    return (
+        db.query(Gps)
+        .filter(Gps.upload == False, Gps.upload_error.is_(None))  # noqa: E712
+        .order_by(Gps.id.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+def upload_pending_gps(db: Session, id: int):
+    gps = db.query(Gps).filter(Gps.id == id).first()
+    if not gps:
+        return None
+    gps.upload = True
+    db.commit()
+    db.refresh(gps)
+    return gps
+
+
+def reject_pending_gps(db: Session, id: int, reason: str):
+    """
+    Saca de la cola un punto que no se subirá nunca, SIN marcarlo como subido.
+    Queda en la base con su motivo para poder revisarlo.
+    """
+    gps = db.query(Gps).filter(Gps.id == id).first()
+    if not gps:
+        return None
+    gps.upload_error = reason[:200]
+    db.commit()
+    db.refresh(gps)
+    return gps
 
 def create_checkpoint(db: Session, checkpoint_id: int, name: str, timestamp):
     existing = db.query(CheckPoint).filter(
@@ -67,9 +225,11 @@ def upload_pending_checkpoints(db: Session, id: int):
     return checkpoint
 
 def create_passenger(db: Session, data: PassengerCreate) -> Passenger:
-    # Misma regla de "última posición" que get_last_position, para que un
-    # pasajero y el mapa no se refieran a lecturas distintas.
-    gps = db.query(Gps).order_by(Gps.created_at.desc()).first()
+    # Misma "última posición" que get_last_position (posición actual, no la
+    # traza filtrada): un pasajero sube con el bus DETENIDO, justo la lectura
+    # que la traza descarta por velocidad 0.
+    last = get_last_position(db)
+    gps = SimpleNamespace(**last) if isinstance(last, dict) else last
 
     if gps is None:
         # Se registra igual: perder el conteo de pasajeros sería peor que

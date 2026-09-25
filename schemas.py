@@ -1,7 +1,14 @@
-from pydantic import BaseModel,Field
-from datetime import datetime
+from pydantic import BaseModel,Field,field_validator
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from enum import Enum
 from typing import Literal
+
+# Límite inferior de un timestamp GPS plausible. Un receptor sin fix (o una
+# Raspberry sin RTC antes de sincronizar la hora) suele reportar 1970/1980/2000:
+# ese punto se subiría al backend con una fecha absurda.
+MIN_GPS_TIMESTAMP = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
 
 class GPSDataCreate(BaseModel):
     # allow_inf_nan=False: NaN e infinito son float válidos para Python pero
@@ -10,17 +17,62 @@ class GPSDataCreate(BaseModel):
     # El rango descarta además coordenadas imposibles.
     latitude: float = Field(..., allow_inf_nan=False, ge=-90, le=90)
     longitude: float = Field(..., allow_inf_nan=False, ge=-180, le=180)
-    # speed es informativa: se admite null (el receptor puede no reportarla),
-    # pero no NaN/infinito.
-    speed: float | None = Field(None, allow_inf_nan=False)
+    # Velocidad:
+    #   ausente / null → DESCONOCIDA: la lectura se acepta y se guarda null.
+    #                    No cuenta como movimiento ni como detención; el punto
+    #                    entra en la traza solo si está a >= 5 m del anterior.
+    #   0              → detenido: actualiza la posición actual, no la traza.
+    #   negativa, NaN, infinito, texto → lectura inválida (422), no se guarda.
+    speed: float | None = Field(None, allow_inf_nan=False, ge=0)
+    # Con zona horaria → instante exacto. Sin zona → hora de pared de
+    # America/Guayaquil (la del equipo). Ver crud.gps_unix_seconds.
     timestamp: datetime
 
-class GPSDataResponse(GPSDataCreate):
+    @field_validator("timestamp")
+    @classmethod
+    def plausible_timestamp(cls, value: datetime) -> datetime:
+        aware = value if value.tzinfo else value.replace(tzinfo=ZoneInfo("America/Guayaquil"))
+        if aware < MIN_GPS_TIMESTAMP:
+            raise ValueError("timestamp GPS anterior a 2020: el receptor no tiene hora válida")
+        return value
+
+
+class GPSDataResponse(BaseModel):
+    # Sin las restricciones de GPSDataCreate a propósito: una fila antigua con
+    # un valor que hoy se rechazaría no puede tumbar la lectura con un 500.
     id: int
-    created_at: datetime
+    latitude: float
+    longitude: float
+    speed: float | None = None
+    timestamp: datetime
+    created_at: datetime | None = None
+    upload: bool = False
+    timestamp_unix: int | None = None
+    upload_error: str | None = None
 
     class Config:
         from_attributes = True
+
+
+class GPSPositionResponse(BaseModel):
+    """
+    Posición actual (GET /api/gps/last_position). Misma forma de siempre para
+    el monitor y las pantallas; `id` es la fila de traza en la que se archivó
+    la lectura y es null cuando el filtro la descartó (bus detenido o < 5 m).
+    """
+    id: int | None = None
+    latitude: float
+    longitude: float
+    speed: float | None = None
+    timestamp: datetime
+    created_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class GPSRejectRequest(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=200)
 
 
 class CheckPointCreate(BaseModel):

@@ -1,13 +1,34 @@
 """
-Cliente del backend remoto SIMTRA.
+Cliente del backend remoto SIMTRA (Buslytics).
 
-Es la ÚNICA salida a internet del sistema. Todas las llamadas llevan timeout:
-un socket colgado en la red del bus dejaría el proceso vivo pero bloqueado, y
-systemd no lo reiniciaría.
+Es la ÚNICA salida a internet del sistema y habla EXCLUSIVAMENTE con las rutas
+`/api/device-api/*`, autenticadas con la cabecera `X-API-Key` del equipo
+(`FAST_API_DEVICE_API_KEY`). No hay login, ni JWT, ni fallback a las rutas
+antiguas: si la clave falta o el backend la rechaza, el error se devuelve
+explícito y el llamador decide (conservar colas, conservar itinerario).
 
-Ante un 401 se renueva el token y se reintenta la operación UNA sola vez; el
-reintento nunca vuelve a reintentar, así que no existe bucle de autenticación.
-Ni la contraseña ni el token se registran nunca en los logs.
+Contrato confirmado en buslytics-backend
+(src/modules/device-api/device-api.controller.ts, prefijo global `api`):
+
+    GET   /api/device-api/dispatch/:register?date=YYYY-MM-DD
+          200 {result: [...]} · 404 "No dispatch found…" = día sin despachos
+    PATCH /api/device-api/dispatch/:register   {id, time_reported}
+          200 registrada (o reintento con la MISMA hora) · 409 hora distinta
+    POST  /api/device-api/gps/:register        {timestamp, latitude, longitude, speed?}
+          201 registrado O descartado por las reglas de traza del backend
+    POST  /api/device-api/passenger            {timestamp, latitude, longitude,
+                                                register, direction?, door?}
+          201 registrado
+
+`DeviceApiKeyGuard` responde 401 ante clave ausente/inválida/desactivada y 403
+si el registro de la petición no es el del bus asignado al equipo. El
+`ValidationPipe` global usa `forbidNonWhitelisted`: un campo de más es un 400.
+
+NO existe en device-api una ruta para la ficha del vehículo (ver get_vehicle).
+
+Todas las llamadas llevan timeout: un socket colgado en la red del bus dejaría
+el proceso vivo pero bloqueado, y systemd no lo reiniciaría. La API key nunca
+se registra en los logs ni viaja en la URL.
 """
 
 import logging
@@ -22,27 +43,26 @@ log = logging.getLogger("simtra")
 # del bus es lenta, pero acotado: sin él una conexión colgada bloquea el hilo.
 DEFAULT_TIMEOUT = 10
 
-# Códigos con los que el backend da por bueno un login. Es 201 porque
-# AuthController lo fija así; se admite 200 por si esa ruta se normaliza.
-LOGIN_OK_STATUSES = (200, 201)
+DEVICE_API_PREFIX = "/api/device-api"
+API_KEY_HEADER = "X-API-Key"
+
+# Mensaje con el que DispatchService.getByRegisterAndDate responde 404 cuando
+# el bus no tiene despachos ese día. Cualquier otro 404 (ruta inexistente,
+# backend desactualizado) NO es un día vacío.
+NO_DISPATCH_MESSAGE_PREFIX = "No dispatch found"
 
 
 # ─────────────────────────────────────────────
 # RESULTADO EXPLÍCITO DE UNA LECTURA DE DESPACHOS
 #
-# `get_dispatch()` devuelve [] tanto cuando el bus no trabaja hoy como cuando la
-# red falló. Para la pantalla eso es indistinguible y es justo la diferencia que
-# necesita la recarga manual: un día sin despachos debe vaciar el itinerario,
-# un error NO debe tocarlo.
-#
-# Se añade un método nuevo en vez de cambiar el existente: los consumidores
-# actuales (bus_monitor.load_all_dispatches) siguen funcionando igual.
+# Un día sin despachos debe vaciar el itinerario; un error NO debe tocarlo.
 # ─────────────────────────────────────────────
 
 FETCH_OK            = "ok"                 # respuesta válida con despachos
 FETCH_EMPTY         = "empty"              # respuesta válida, el bus no trabaja hoy
-FETCH_AUTH_ERROR    = "auth_error"         # credenciales rechazadas (401/403)
-FETCH_TRANSPORT     = "transport_error"    # red caída, timeout, 5xx, 404…
+FETCH_AUTH_ERROR    = "auth_error"         # API key rechazada (401/403)
+FETCH_CONFIG_ERROR  = "config_error"       # falta URL o API key en el .env
+FETCH_TRANSPORT     = "transport_error"    # red caída, timeout, 5xx, 404 de ruta…
 FETCH_INVALID       = "invalid_response"   # respondió, pero con una forma inutilizable
 
 
@@ -64,34 +84,74 @@ class DispatchFetch:
         return self.status in (FETCH_OK, FETCH_EMPTY)
 
 
-class ApiService:
-    """
-    API pública sin cambios: get_jwt, get_dispatch, get_vehicle, post_passenger,
-    update_dispatch. Lo que cambia es que ahora fallan de forma predecible —
-    lista vacía, None o False— en vez de propagar excepciones o devolver
-    respuestas a medio validar.
-    """
+# ─────────────────────────────────────────────
+# RESULTADO EXPLÍCITO DE UNA ESCRITURA
+#
+# data_loader necesita más que un booleano: un 400 (dato que el backend nunca
+# aceptará) no se trata igual que un timeout (reintentar) ni que un 401 (parar
+# la cola hasta que el operador arregle la clave).
+# ─────────────────────────────────────────────
 
-    def __init__(self, api_url, username, password):
-        self.user = username
-        self.password = password
+SEND_OK           = "ok"             # confirmado por el contrato (201/200)
+SEND_CONFLICT     = "conflict"       # 409: el backend ya tiene OTRO valor; no se sobrescribe
+SEND_REJECTED     = "rejected"       # 400/422: el dato nunca será aceptado tal cual
+SEND_AUTH_ERROR   = "auth_error"     # 401/403: clave rechazada o bus no asignado
+SEND_CONFIG_ERROR = "config_error"   # falta URL o API key: no se llegó a enviar
+SEND_NOT_FOUND    = "not_found"      # 404: despacho o vehículo inexistente (o ruta ausente)
+SEND_RETRY        = "retry"          # red, timeout, 429, 5xx: reintentar después
+
+
+@dataclass(frozen=True)
+class SendResult:
+    status: str
+    http_status: Optional[int] = None
+
+    def __bool__(self) -> bool:
+        return self.status == SEND_OK
+
+    @property
+    def ok(self) -> bool:
+        return self.status == SEND_OK
+
+    @property
+    def stops_queue(self) -> bool:
+        """
+        ¿Hay que dejar de enviar en este ciclo?
+
+        Con la clave rechazada, sin configuración o sin red, cada envío
+        siguiente fallará igual: insistir solo alarga el ciclo (hasta
+        DEFAULT_TIMEOUT por elemento) y retrasa las otras colas.
+        """
+        return self.status in (SEND_AUTH_ERROR, SEND_CONFIG_ERROR, SEND_RETRY)
+
+
+class ApiService:
+    """Cliente device-api. Nunca lanza: devuelve DispatchFetch / SendResult / None."""
+
+    def __init__(self, api_url, device_api_key):
         self.api_url = (api_url or "").rstrip("/")
-        # Token perezoso: pedirlo en el constructor hacía que un arranque sin
-        # señal (lo normal en un bus que enciende) dejara el servicio sin token
-        # y, con la red caída, bloqueara el import del módulo.
-        self.jwt = ""
+        self.device_api_key = (device_api_key or "").strip()
         self._session = requests.Session()
+        self._vehicle_warning_logged = False
 
     # ─────────────────────────────────────────
     # INTERNO
     # ─────────────────────────────────────────
 
-    def _auth_headers(self) -> dict:
+    def _headers(self) -> dict:
         return {
-            "Authorization": f"Bearer {self.jwt}",
+            API_KEY_HEADER: self.device_api_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+
+    def configuration_error(self) -> Optional[str]:
+        """Motivo por el que no se puede hablar con el backend, o None."""
+        if not self.api_url:
+            return "FAST_API_BACKEND_URL no está configurada"
+        if not self.device_api_key:
+            return "FAST_API_DEVICE_API_KEY no está configurada"
+        return None
 
     @staticmethod
     def _json(response, description: str):
@@ -103,136 +163,92 @@ class ApiService:
             log.error(f"[API] {description}: respuesta no es JSON válido (HTTP {response.status_code}) {body!r}")
             return None
 
-    def _result(self, response, description: str, ok_statuses=(200,)):
-        """
-        Campo `result` de una respuesta correcta, o None. Valida la envoltura
-        antes de devolver nada: el resto del sistema no debe recibir estructuras
-        a medias.
-
-        `ok_statuses` es parametrizable porque el login del backend responde 201
-        (@HttpCode(201) en AuthController), no el 200 del resto de lecturas.
-        """
-        if response is None:
-            return None
-        if response.status_code not in ok_statuses:
-            log.error(f"[API] {description}: HTTP {response.status_code}")
-            return None
-
-        data = self._json(response, description)
-        if not isinstance(data, dict):
-            log.error(f"[API] {description}: cuerpo inesperado ({type(data).__name__})")
-            return None
-        if "result" not in data:
-            log.error(f"[API] {description}: respuesta sin campo 'result'")
-            return None
-        return data["result"]
-
     def _request(self, method: str, path: str, description: str,
-                 json=None, retry_on_401: bool = True) -> Optional[requests.Response]:
+                 json=None, params=None) -> Optional[requests.Response]:
         """
-        Solicitud autenticada con timeout. Devuelve la respuesta o None si no se
-        pudo completar. `retry_on_401=False` en el reintento corta cualquier
-        posibilidad de recursión infinita.
+        Solicitud autenticada con X-API-Key y timeout. Devuelve la respuesta o
+        None si no se pudo completar (red). No reintenta: un 401 aquí significa
+        clave ausente, inválida o desactivada, y repetir no lo arregla.
         """
-        if not self.api_url:
-            log.error(f"[API] {description}: backend remoto sin URL configurada")
+        kwargs = {"json": json, "headers": self._headers(), "timeout": DEFAULT_TIMEOUT}
+        if params:
+            kwargs["params"] = params
+        try:
+            return self._session.request(method, f"{self.api_url}{path}", **kwargs)
+        except requests.RequestException as e:
+            # La clave va en una cabecera: el texto de la excepción (URL, causa)
+            # no la contiene.
+            log.error(f"[API] {description}: fallo de red ({type(e).__name__})")
             return None
 
-        if not self.jwt:
-            self.get_jwt()
+    def _send(self, method: str, path: str, description: str, json,
+              ok_statuses: tuple) -> SendResult:
+        config_error = self.configuration_error()
+        if config_error:
+            log.error(f"[API] {description}: {config_error} — no se envía")
+            return SendResult(SEND_CONFIG_ERROR)
 
-        try:
-            response = self._session.request(
-                method,
-                f"{self.api_url}{path}",
-                json=json,
-                headers=self._auth_headers(),
-                timeout=DEFAULT_TIMEOUT,
-            )
-        except requests.RequestException as e:
-            log.error(f"[API] {description}: fallo de red ({e})")
-            return None
+        response = self._request(method, path, description, json=json)
+        if response is None:
+            return SendResult(SEND_RETRY)
 
-        if response.status_code == 401 and retry_on_401:
-            log.warning(f"[API] {description}: token no válido o expirado — se renueva y se reintenta una vez")
-            if not self.get_jwt():
-                # Se devuelve el 401 original en vez de None: para el llamador la
-                # diferencia entre "no hubo red" y "las credenciales no sirven"
-                # es la que separa un error transitorio de uno que exige tocar el
-                # .env, y `fetch_dispatch` la necesita para reportarla.
-                return response
-            return self._request(method, path, description, json=json, retry_on_401=False)
+        code = response.status_code
+        if code in ok_statuses:
+            return SendResult(SEND_OK, code)
+        if code in (401, 403):
+            log.error(f"[API] {description}: API key rechazada o bus no asignado (HTTP {code})")
+            return SendResult(SEND_AUTH_ERROR, code)
+        if code == 409:
+            log.warning(f"[API] {description}: el backend ya tiene otro valor (HTTP 409)")
+            return SendResult(SEND_CONFLICT, code)
+        if code in (400, 422):
+            log.error(f"[API] {description}: dato rechazado por el backend (HTTP {code})")
+            return SendResult(SEND_REJECTED, code)
+        if code == 404:
+            log.error(f"[API] {description}: recurso no encontrado (HTTP 404)")
+            return SendResult(SEND_NOT_FOUND, code)
 
-        return response
+        log.error(f"[API] {description}: HTTP {code} — se reintentará")
+        return SendResult(SEND_RETRY, code)
 
     # ─────────────────────────────────────────
-    # API PÚBLICA
+    # LECTURAS
     # ─────────────────────────────────────────
-
-    def get_jwt(self) -> str:
-        """
-        Renueva el token y lo devuelve ('' si no se pudo). No reintenta: es el
-        propio mecanismo de reintento de _request.
-        """
-        self.jwt = ""
-
-        if not self.api_url or not self.user:
-            log.error("[API] Login: falta URL o usuario del backend remoto")
-            return ""
-
-        try:
-            response = self._session.post(
-                f"{self.api_url}/api/auth/login",
-                json={"email": self.user, "password": self.password},
-                headers={"Content-Type": "application/json"},
-                timeout=DEFAULT_TIMEOUT,
-            )
-        except requests.RequestException as e:
-            log.error(f"[API] Login: fallo de red ({e})")
-            return ""
-
-        # El backend emite el token con 201, no con 200: `POST /api/auth/login`
-        # lleva un @HttpCode(201) explícito. Se aceptan ambos para no depender
-        # de ese detalle si algún día se normaliza a 200.
-        if response.status_code not in LOGIN_OK_STATUSES:
-            # Nunca se registra usuario ni contraseña.
-            log.error(f"[API] Login rechazado (HTTP {response.status_code})")
-            return ""
-
-        result = self._result(response, "Login", ok_statuses=LOGIN_OK_STATUSES)
-        token = result.get("token") if isinstance(result, dict) else None
-
-        if not isinstance(token, str) or not token:
-            log.error("[API] Login: respuesta sin token utilizable")
-            return ""
-
-        self.jwt = token
-        log.info("[API] Token renovado")
-        return token
 
     def fetch_dispatch(self, register, date) -> DispatchFetch:
         """
-        Despachos del día con resultado EXPLÍCITO.
+        Despachos del día con resultado EXPLÍCITO (ver FETCH_*). Nunca lanza.
 
-        Distingue las cuatro situaciones que la pantalla necesita separar:
-
-            FETCH_OK         → hay despachos utilizables
-            FETCH_EMPTY      → el backend respondió bien y el bus no trabaja hoy
-            FETCH_AUTH_ERROR → credenciales rechazadas (401/403 tras reintentar)
-            FETCH_TRANSPORT  → no se pudo hablar con el backend (red, 5xx, 404…)
-            FETCH_INVALID    → respondió, pero el cuerpo no es utilizable
-
-        Nunca lanza. Ni el usuario ni la contraseña aparecen en el log.
+        `GET /api/device-api/dispatch/:register?date=` responde 404 con el
+        mensaje "No dispatch found for vehicle …" cuando el bus no trabaja ese
+        día: eso es FETCH_EMPTY. Cualquier otro 404 es de transporte.
         """
-        description = f"GET /api/dispatch/{register}"
-        response = self._request("GET", f"/api/dispatch/{register}?date={date}", description)
+        description = f"GET {DEVICE_API_PREFIX}/dispatch/{register}"
+
+        config_error = self.configuration_error()
+        if config_error:
+            log.error(f"[API] {description}: {config_error}")
+            return DispatchFetch(FETCH_CONFIG_ERROR)
+
+        response = self._request(
+            "GET", f"{DEVICE_API_PREFIX}/dispatch/{register}", description,
+            params={"date": date},
+        )
 
         if response is None:
             return DispatchFetch(FETCH_TRANSPORT)
 
         if response.status_code in (401, 403):
-            log.error(f"[API] {description}: credenciales rechazadas (HTTP {response.status_code})")
+            log.error(f"[API] {description}: API key rechazada o bus no asignado (HTTP {response.status_code})")
             return DispatchFetch(FETCH_AUTH_ERROR)
+
+        if response.status_code == 404:
+            data = self._json(response, description)
+            message = data.get("message") if isinstance(data, dict) else None
+            if isinstance(message, str) and message.startswith(NO_DISPATCH_MESSAGE_PREFIX):
+                return DispatchFetch(FETCH_EMPTY)
+            log.error(f"[API] {description}: HTTP 404 sin la forma de 'día sin despachos'")
+            return DispatchFetch(FETCH_TRANSPORT)
 
         if response.status_code != 200:
             log.error(f"[API] {description}: HTTP {response.status_code}")
@@ -252,49 +268,51 @@ class ApiService:
 
         return DispatchFetch(FETCH_OK if result else FETCH_EMPTY, result)
 
-    def get_dispatch(self, register, date) -> list:
-        """
-        Despachos del día. Siempre una lista (vacía si no se pudo obtener).
-
-        Se conserva por compatibilidad con bus_monitor.load_all_dispatches, que
-        solo necesita saber si hay trabajo hoy. Quien deba distinguir "sin
-        despachos" de "falló la consulta" tiene que usar `fetch_dispatch`.
-        """
-        return self.fetch_dispatch(register, date).dispatches
-
     def get_vehicle(self, register) -> Optional[dict]:
-        """Ficha del vehículo, o None si no se pudo obtener o no es un objeto."""
-        description = f"GET /api/vehicle/register/{register}"
-        response = self._request("GET", f"/api/vehicle/register/{register}", description)
-        result = self._result(response, description)
+        """
+        Ficha del vehículo: BLOQUEADA, siempre None y sin tocar la red.
 
-        if result is None:
-            return None
-        if not isinstance(result, dict):
-            log.error(f"[API] {description}: 'result' es {type(result).__name__}, se esperaba objeto — se ignora")
-            return None
-        return result
+        device-api no expone ninguna ruta de lectura del vehículo, y la antigua
+        `GET /api/vehicle/register/:register` exige JWT de usuario, que este
+        equipo ya no tiene. No se inventa una ruta: hasta que el backend
+        publique `GET /api/device-api/vehicle/:register` (ver README →
+        "Bloqueo: ficha del vehículo"), la ficha cacheada en la API local se
+        conserva tal cual y no se actualiza.
+        """
+        if not self._vehicle_warning_logged:
+            log.warning(
+                f"[API] Ficha del vehículo {register}: device-api no expone una ruta "
+                "de lectura del vehículo — se conserva la ficha local"
+            )
+            self._vehicle_warning_logged = True
+        return None
 
-    def post_passenger(self, data) -> bool:
-        """True solo si el backend confirmó la creación (201)."""
-        description = "POST /api/passenger"
-        response = self._request("POST", "/api/passenger", description, json=data)
+    # ─────────────────────────────────────────
+    # ESCRITURAS
+    # ─────────────────────────────────────────
 
-        if response is None:
-            return False
-        if response.status_code != 201:
-            log.error(f"[API] {description}: HTTP {response.status_code}")
-            return False
-        return True
+    def post_passenger(self, data) -> SendResult:
+        """`POST /api/device-api/passenger`. OK solo con 201."""
+        return self._send(
+            "POST", f"{DEVICE_API_PREFIX}/passenger",
+            f"POST {DEVICE_API_PREFIX}/passenger", data, ok_statuses=(201,),
+        )
 
-    def update_dispatch(self, data) -> bool:
-        """True solo si el backend confirmó la actualización (200)."""
-        description = "PATCH /api/dispatch"
-        response = self._request("PATCH", "/api/dispatch", description, json=data)
+    def update_dispatch(self, data, register) -> SendResult:
+        """
+        `PATCH /api/device-api/dispatch/:register`. OK solo con 200, que el
+        backend devuelve también al reintentar con la misma hora. 409 = el
+        despacho ya tiene otra hora y no se sobrescribe (SEND_CONFLICT).
+        """
+        path = f"{DEVICE_API_PREFIX}/dispatch/{register}"
+        return self._send("PATCH", path, f"PATCH {path}", data, ok_statuses=(200,))
 
-        if response is None:
-            return False
-        if response.status_code != 200:
-            log.error(f"[API] {description}: HTTP {response.status_code}")
-            return False
-        return True
+    def post_gps(self, data, register) -> SendResult:
+        """
+        `POST /api/device-api/gps/:register`. OK solo con 201, que el backend
+        devuelve tanto si archivó el punto como si lo descartó por sus reglas
+        de traza (velocidad 0, < 5 m del anterior): en ambos casos el punto
+        quedó procesado y no hay que reenviarlo.
+        """
+        path = f"{DEVICE_API_PREFIX}/gps/{register}"
+        return self._send("POST", path, f"POST {path}", data, ok_statuses=(201,))

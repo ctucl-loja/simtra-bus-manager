@@ -26,7 +26,35 @@ ADDED_COLUMNS = {
     # debe adoptarlo, y el que impide que una carga antigua del monitor pise
     # una recarga más nueva (ver services/bus_monitor.py).
     "dispatch": [("revision", "INTEGER NOT NULL DEFAULT 0")],
+    # Cola de subida de trazas GPS (ver models.Gps). Las Raspberry que ya
+    # tienen la tabla `gps` necesitan estas columnas sin recrear la base.
+    "gps": [
+        ("upload", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("timestamp_unix", "INTEGER"),
+        ("upload_error", "VARCHAR"),
+    ],
 }
+
+
+# Sentencia que se ejecuta UNA vez, en la misma transacción, cuando la columna
+# indicada se acaba de agregar a una tabla existente.
+#
+# gps.upload: las filas anteriores a la migración NO se encolan. Son la traza
+# sin filtrar de meses (una por segundo, detenido incluido), con timestamps sin
+# zona de origen conocida, y subirlas de golpe inundaría device-api con puntos
+# cuyo instante no se puede garantizar. Se conservan intactas; el README indica
+# cómo reencolarlas a mano si se decide subirlas.
+BACKFILL = {
+    ("gps", "upload"): "UPDATE gps SET upload = 1",
+}
+
+
+# Índices que `create_all` no crea en tablas existentes. Idempotentes.
+ADDED_INDEXES = [
+    # La cola pendiente se consulta cada ciclo del loader; sin índice sería un
+    # recorrido completo de una tabla que crece ~30 000 filas por jornada.
+    "CREATE INDEX IF NOT EXISTS ix_gps_pending ON gps (upload, upload_error, id)",
+]
 
 
 def ensure_schema(bind=None) -> list[str]:
@@ -52,5 +80,14 @@ def ensure_schema(bind=None) -> list[str]:
                     continue
                 connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
                 applied.append(f"{table}.{name}")
+                backfill = BACKFILL.get((table, name))
+                if backfill:
+                    connection.execute(text(backfill))
+
+        tables_now = set(inspect(connection).get_table_names())
+        for statement in ADDED_INDEXES:
+            table = statement.split(" ON ", 1)[1].split(" ", 1)[0]
+            if table in tables_now:
+                connection.execute(text(statement))
 
     return applied

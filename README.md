@@ -10,7 +10,7 @@ Microservicio de gestión de flotas de buses corriendo en Raspberry Pi. Compuest
 |---|---|
 | `simtra-bus-manager` | API FastAPI — GPS, checkpoints y pasajeros |
 | `simtra-bus-monitor` | Monitor de geofencing y puntos de control |
-| `simtra-bus-loader` | Sincronización de datos recopilados al backend |
+| `simtra-bus-loader` | Sincronización de GPS, pasajeros y checkpoints al backend |
 
 ---
 
@@ -71,6 +71,156 @@ Documentación interactiva disponible en: `http://192.168.1.14:8000/docs`
 
 ---
 
+## Backend remoto: device-api (X-API-Key)
+
+Toda la comunicación con el backend remoto (Buslytics) sale de
+`services/api.py` y usa **exclusivamente** las rutas `/api/device-api/*` con la
+cabecera `X-API-Key: <FAST_API_DEVICE_API_KEY>`. Ya no existe login con
+usuario/contraseña, ni JWT, ni renovación tras 401, ni fallback a las rutas
+antiguas. Consumidores: `main.py` (recarga manual), `bus_monitor.py`
+(despachos) y `data_loader.py` (subidas).
+
+### Variables
+
+| Variable | Estado |
+|---|---|
+| `FAST_API_BACKEND_URL` | Requerida. URL base, sin `/api` |
+| `FAST_API_DEVICE_API_KEY` | **Requerida.** Clave del equipo (panel de Buslytics → Dispositivos) |
+| `FAST_API_BUS_REGISTER` | Requerida. Debe ser el bus asignado a ese equipo en el panel (si no: 403) |
+| `FAST_API_BACKEND_USERNAME` | **Retirada**: ya no se lee. Eliminarla del `.env` |
+| `FAST_API_BACKEND_PASSWORD` | **Retirada**: ya no se lee. Eliminarla del `.env` |
+
+Sin clave (o sin URL) no se hace ninguna petición: el monitor lo registra, la
+recarga manual responde `auth_error` («Este equipo no tiene configurada su
+clave de acceso a SIMTRA») y el loader detiene la sincronización conservando
+todas las colas. La clave nunca aparece en logs, URLs ni respuestas.
+
+### Contrato confirmado (buslytics-backend, `device-api.controller.ts`)
+
+| Uso | Método y ruta | Cuerpo | Éxito |
+|---|---|---|---|
+| Despachos del día | `GET /api/device-api/dispatch/:register?date=YYYY-MM-DD` | — | `200 {result: [...]}`; **`404 "No dispatch found…"` = día sin despachos** |
+| Marcación de checkpoint | `PATCH /api/device-api/dispatch/:register` | `{id, time_reported}` | `200` (también si se reenvía la misma hora); `409` = ya tiene otra hora |
+| Punto GPS | `POST /api/device-api/gps/:register` | `{timestamp, latitude, longitude, speed?}` | `201` (registrado **o** descartado por las reglas del backend) |
+| Pasajero | `POST /api/device-api/passenger` | `{timestamp, latitude, longitude, register, direction?, door?}` | `201` |
+
+Comunes: `401` = clave ausente, inválida o equipo desactivado; `403` = el
+registro no es el del bus asignado al equipo; `400` = validación
+(`forbidNonWhitelisted`: un campo de más también es 400). Cualquier 404 que no
+sea el de "No dispatch found" se trata como error de transporte, nunca como
+día vacío.
+
+### Bloqueo: ficha del vehículo
+
+device-api **no expone ninguna lectura del vehículo**. La ruta antigua
+`GET /api/vehicle/register/:register` exige JWT de usuario, así que no se usa.
+`ApiService.get_vehicle()` devuelve `None` sin tocar la red y
+`bus_monitor.sync_vehicle_info()` conserva la ficha ya cacheada en
+`GET /api/vehicle` (placa, propietario y cooperativa que muestran las
+pantallas). En un equipo **nuevo** esa ficha quedará vacía hasta que el backend
+publique, por ejemplo:
+
+```http
+GET /api/device-api/vehicle/:register        X-API-Key: <clave>
+200 {"statusCode":200,"message":"…","result":{
+      "id":88,"register":1539,"plate":"LBA-1234",
+      "user":{"name":"…","lastname":"…"},
+      "company":{"name":"…"}}}
+```
+
+con el mismo `DeviceApiKeyGuard` (comprobación del registro) y **sin** exponer
+datos sensibles del propietario. No se ha modificado el backend.
+
+---
+
+## Cola local de GPS
+
+`POST /api/gps` recibe cada lectura del receptor. Una lectura **válida**:
+
+1. **Siempre** actualiza la posición actual (`gps_current`, una sola fila), que
+   es lo que sirve `GET /api/gps/last_position` al monitor de geocercas, a las
+   pantallas y a `POST /api/passenger`. Así un bus detenido en una parada no
+   queda "congelado" en el último punto en movimiento.
+2. Entra en la **traza** (`gps`, `upload = false`, pendiente de subir) solo si
+   - la velocidad no es 0, y
+   - está a **5 m o más** del último punto **aceptado y guardado** (se compara
+     con la última fila de la traza, no con la última lectura recibida).
+
+   Menos de 5 m o velocidad 0 → no se crea ninguna fila de traza; la respuesta
+   es `null` (200).
+
+La comprobación "leer último punto → decidir → insertar" está serializada con
+un bloqueo en `crud.py`: dos lecturas simultáneas no pueden archivarse ambas
+comparándose con el mismo punto. Vale para un único proceso uvicorn (el
+servicio systemd no usa `--workers`); con varios workers haría falta un
+bloqueo en la base.
+
+### Velocidad
+
+| `speed` | Tratamiento |
+|---|---|
+| ausente / `null` | **Desconocida**: la lectura se acepta y se guarda `null`. No cuenta como movimiento ni como detención: entra en la traza solo si está a ≥ 5 m |
+| `0` | Detenido: actualiza la posición actual, no la traza |
+| `> 0` | Normal (filtro de 5 m) |
+| negativa, `NaN`, infinito, texto | Lectura inválida: `422`, no se guarda nada |
+
+También se rechazan con `422` coordenadas fuera de rango o no finitas y
+timestamps no parseables o anteriores a 2020 (receptor sin hora válida).
+
+### Timestamps
+
+- Con zona horaria (`…Z`, `…-05:00`): instante exacto.
+- Sin zona: hora de pared de `America/Guayaquil` (así envía el simulador).
+- El instante Unix se calcula **al recibir** el punto y se guarda en
+  `gps.timestamp_unix`. SQLite no conserva la zona de `gps.timestamp`, así que
+  reinterpretarlo después desplazaría 5 h los puntos que llegaron en UTC. El
+  loader sube `timestamp_unix` (entero, segundos) sin más conversiones.
+
+### Subida (`simtra-bus-loader`)
+
+```
+gps (upload=0) → GET /api/gps/pending?limit=100 (orden de inserción)
+  → POST /api/device-api/gps/:register (X-API-Key)
+  → 201 → PATCH /api/gps/{id} (upload=1)
+```
+
+- Solo `201` marca el punto como subido.
+- Timeout, red caída, `5xx`, `404`, `401`/`403` o falta de clave → el punto
+  sigue pendiente y el ciclo se corta (los siguientes fallarían igual), en el
+  mismo orden para el próximo intento.
+- `400` del backend (o registro local inutilizable) → `POST /api/gps/{id}/reject`:
+  sale de la cola con su motivo en `upload_error`, **sin** marcarse como subido,
+  y no bloquea a los siguientes.
+- Si el backend confirmó pero falló el `PATCH` local, el loader recuerda el id
+  y en el ciclo siguiente reintenta **solo el marcado**, sin reenviar. Si el
+  proceso se reinicia entre medias, el punto se reenvía: el backend lo descarta
+  (distancia 0 al último guardado) salvo que haya recibido otro punto entre
+  tanto. Con pasajeros un reenvío sí duplicaría el evento (el backend no
+  deduplica); por eso el reintento de marcado.
+- Orden del ciclo: checkpoints, pasajeros y por último GPS, en tandas de 100
+  puntos y como máximo 30 s por ciclo; cada petición remota tiene 10 s de
+  timeout.
+
+### Migración de SQLite
+
+Al arrancar, `database.ensure_schema()` agrega `gps.upload`,
+`gps.timestamp_unix`, `gps.upload_error`, la tabla `gps_current` y el índice
+`ix_gps_pending`, sin recrear ni borrar nada. Las filas de `gps` **anteriores**
+a la migración se conservan pero **no se encolan** (`upload = 1`): son traza sin
+filtrar y con zona horaria incierta. Si se decide subirlas igualmente:
+
+```sql
+UPDATE gps SET upload = 0 WHERE timestamp_unix IS NULL;   -- se interpretarán como hora de Ecuador
+```
+
+### Limitación conocida del backend
+
+`GpsService` "arbitra" el reloj del equipo: si el instante recibido está a más
+de 30 min de la hora del servidor, prueba a reinterpretarlo como hora local de
+Ecuador (+5 h). Un punto correcto en UTC que se sube con **≈ 5 h de retraso**
+(cola acumulada sin red) puede quedar desplazado +5 h en el backend. No tiene
+arreglo del lado del equipo; solo afecta a colas de varias horas.
+
 ## Rutas del proyecto
 
 | Entorno | Ruta |
@@ -101,12 +251,13 @@ de la maquina donde corre**.
 
 | Archivo | Que ejercita | Dependencias |
 |---|---|---|
-| Todos menos el siguiente | Funciones puras y servicios, con stubs | Ninguna |
-| `tests/test_api_endpoints.py` | **Endpoints reales**: FastAPI + Pydantic + SQLAlchemy sobre SQLite temporal | `fastapi`, `sqlalchemy`, `httpx` |
+| Todos menos los dos siguientes | Funciones puras y servicios, con stubs (cliente device-api, loader, monitor) | Ninguna |
+| `tests/test_api_endpoints.py` | **Endpoints reales**: FastAPI + Pydantic + SQLAlchemy sobre SQLite temporal (cola GPS, filtro de 5 m, concurrencia, migracion) | `fastapi`, `sqlalchemy`, `httpx` |
+| `tests/test_gps_pipeline.py` | **Extremo a extremo**: `POST /api/gps` → `data_loader.sync_once()` → `ApiService` real con device-api simulado → marcado en SQLite | `fastapi`, `sqlalchemy`, `httpx` |
 
 Los tests unitarios **no validan los endpoints**: no importan `main.py` y no
 ejercitan ni el enrutado, ni los `response_model`, ni la persistencia. Para eso
-esta `test_api_endpoints.py`, que se **salta con un motivo visible** si faltan
+estan `test_api_endpoints.py` y `test_gps_pipeline.py`, que se **saltan con un motivo visible** si faltan
 las dependencias, para que la suite siga corriendo en una maquina pelada:
 
 ```bash
@@ -115,7 +266,9 @@ python3 -m unittest discover -s tests -t tests   # ya sin "skipped"
 ```
 
 Cada test de integracion usa una base SQLite **temporal y propia** (nunca
-`./app.db`) y un doble del backend remoto.
+`./app.db`) y un doble del backend remoto. **Ninguna prueba hace subidas
+reales**: el contrato device-api se verifico leyendo el codigo de
+buslytics-backend, no contra un servidor desplegado.
 
 ---
 
@@ -521,8 +674,8 @@ En la conversacion del proyecto se hablo de «usuario y clave» de la red. En es
 implementacion **«usuario» significa el NOMBRE DE LA RED WI-FI (SSID)**, y asi
 esta etiquetado el campo en la pantalla: «Nombre de red (SSID)».
 
-No tiene ninguna relacion con el usuario del backend remoto SIMTRA
-(`FAST_API_BACKEND_USERNAME`), ni con un usuario del sistema. **No hay soporte
+No tiene ninguna relacion con el backend remoto SIMTRA (que se autentica con
+`FAST_API_DEVICE_API_KEY`), ni con un usuario del sistema. **No hay soporte
 802.1X / WPA-Enterprise** (usuario + contrasena contra un RADIUS): el equipo se
 conecta a redes WPA/WPA2-PSK o abiertas, que es lo que hay en un patio de buses.
 
@@ -643,7 +796,7 @@ asi que si el monitor no ha recargado devuelve lo mismo una y otra vez.
 
 ```
 pantalla -> POST /api/dispatch/refresh (API local)
-         -> backend remoto SIMTRA (services/api.py, con JWT)
+         -> GET /api/device-api/dispatch/:register (services/api.py, X-API-Key)
          -> validacion de estructura
          -> fusion con las marcaciones locales pendientes
          -> persistencia en SQLite, en una transaccion
@@ -653,8 +806,9 @@ pantalla -> POST /api/dispatch/refresh (API local)
 
 La peticion **no lleva cuerpo**: el registro sale de `FAST_API_BUS_REGISTER` y la
 fecha del reloj del equipo en `America/Guayaquil`. **Ninguna credencial del
-backend remoto llega jamas al frontend**: `FAST_API_BACKEND_URL`, `..._USERNAME`
-y `..._PASSWORD` viven solo en el `.env` del equipo.
+backend remoto llega jamas al frontend**: `FAST_API_BACKEND_URL` y
+`FAST_API_DEVICE_API_KEY` viven solo en el `.env` del equipo (ver «Backend
+remoto: device-api»).
 
 ### Contrato
 
@@ -674,7 +828,7 @@ y `..._PASSWORD` viven solo en el `.env` del equipo.
 |---|---|---|
 | `updated` | Itinerario nuevo descargado, validado y guardado | Si |
 | `empty` | El backend respondio bien y el bus **no trabaja hoy** | Si, queda vacio |
-| `auth_error` | El backend remoto rechazo las credenciales del equipo | **No** |
+| `auth_error` | Falta `FAST_API_DEVICE_API_KEY` o el backend la rechazo (401/403) | **No** |
 | `remote_error` | No se pudo hablar con el backend remoto | **No** |
 | `invalid` | El backend respondio algo inutilizable | **No** |
 | `save_error` | Se descargo bien pero no se pudo guardar | **No** |
@@ -692,11 +846,12 @@ id y coordenadas utilizables. Una lista **vacia** es valida y produce `empty`;
 una lista **con contenido roto** produce `invalid` y no borra nada. Confundirlas
 vaciaria el itinerario del conductor a mitad de jornada por un error del backend.
 
-Para distinguir los cuatro casos hizo falta un metodo nuevo en el cliente
-remoto: `ApiService.fetch_dispatch()` devuelve un `DispatchFetch` con estado
-explicito (`ok` / `empty` / `auth_error` / `transport_error` /
-`invalid_response`). `get_dispatch()` se conserva sin cambios para
-`bus_monitor.load_all_dispatches`, que solo necesita saber si hay trabajo hoy.
+`ApiService.fetch_dispatch()` devuelve un `DispatchFetch` con estado
+explicito (`ok` / `empty` / `auth_error` / `config_error` / `transport_error` /
+`invalid_response`). device-api responde **404 "No dispatch found…"** cuando el
+bus no trabaja ese dia: eso es `empty`; cualquier otro 404 es de transporte.
+`bus_monitor.load_all_dispatches` usa el mismo metodo: solo `empty` vacia el
+itinerario en memoria; un error lo conserva.
 
 ### Marcaciones locales pendientes
 
@@ -989,3 +1144,32 @@ journalctl -u simtra-bus-loader -f
 # Reiniciar un servicio tras actualizar código
 sudo systemctl restart simtra-bus-manager
 ```
+
+---
+
+## Despliegue de la migración a device-api
+
+Pasos en cada Raspberry (no se ejecutan en desarrollo):
+
+1. En el panel de Buslytics, crear/obtener la API key del equipo y verificar
+   que tiene asignado el bus de `FAST_API_BUS_REGISTER`.
+2. Actualizar el código (`git pull`) y, si cambió, `pip install -r requirements.txt`.
+3. Editar `/home/admin/simtra-bus-manager/.env`:
+   - añadir `FAST_API_DEVICE_API_KEY=<clave>`;
+   - **eliminar** `FAST_API_BACKEND_USERNAME` y `FAST_API_BACKEND_PASSWORD`.
+4. Hacer copia de `app.db` antes del primer arranque (la migración solo agrega
+   columnas/tablas, pero es la primera vez que toca `gps`).
+5. Reiniciar **los tres** servicios, empezando por la API (aplica la migración):
+
+   ```bash
+   sudo systemctl restart simtra-bus-manager
+   sudo systemctl restart simtra-bus-monitor simtra-bus-loader
+   ```
+6. Verificar:
+   - `journalctl -u simtra-bus-manager` muestra `[SCHEMA] Columna agregada: gps.…`
+     (solo la primera vez);
+   - `journalctl -u simtra-bus-loader -f` no muestra `no está configurada`
+     ni `API key rechazada`;
+   - `curl http://127.0.0.1:8000/api/gps/pending` baja a `[]` con red;
+   - la recarga del itinerario desde la pantalla responde `updated` o `empty`.
+

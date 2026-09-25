@@ -19,7 +19,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -100,6 +100,8 @@ class ApiTestCase(unittest.TestCase):
 
         os.environ["FAST_API_BUS_REGISTER"] = str(REGISTER)
         os.environ["FAST_API_BACKEND_URL"] = "https://remoto.example.com"
+        os.environ["FAST_API_DEVICE_API_KEY"] = "clave-de-prueba"
+        self.addCleanup(os.environ.pop, "FAST_API_DEVICE_API_KEY", None)
 
         # Importación limpia: estos módulos guardan estado global (engine,
         # metadata) y reutilizarlos entre tests mezclaría bases de datos.
@@ -111,6 +113,7 @@ class ApiTestCase(unittest.TestCase):
 
         import main
         self.main = main
+        self.real_remote = main.remote_api
         self.remote = FakeRemote()
         main.remote_api = self.remote
         self.client = TestClient(main.app)
@@ -184,6 +187,30 @@ class DispatchRefreshEndpointTest(ApiTestCase):
                 self.assertEqual(body["dispatch"]["data"], antes["data"])
                 self.assertEqual(self.stored()["data"], antes["data"])
                 self.assertEqual(self.stored()["revision"], antes["revision"])
+
+    def test_api_key_ausente_o_rechazada_conserva_el_itinerario(self):
+        from services.api import FETCH_OK, FETCH_CONFIG_ERROR, FETCH_AUTH_ERROR
+        self.fetch(FETCH_OK, [make_step()])
+        self.client.post("/api/dispatch/refresh")
+        antes = self.stored()
+
+        for remote_status, detail in ((FETCH_CONFIG_ERROR, "no tiene configurada"),
+                                      (FETCH_AUTH_ERROR, "rechazó la clave")):
+            with self.subTest(remote_status=remote_status):
+                self.fetch(remote_status, [])
+                body = self.client.post("/api/dispatch/refresh").json()
+                self.assertEqual(body["status"], "auth_error")
+                self.assertIn(detail, body["detail"])
+                self.assertEqual(self.stored()["data"], antes["data"])
+                self.assertEqual(self.stored()["revision"], antes["revision"])
+
+    def test_el_cliente_real_usa_device_api_sin_credenciales_antiguas(self):
+        from services.api import ApiService
+        self.assertIsInstance(self.real_remote, ApiService)
+        self.assertEqual(self.real_remote.api_url, "https://remoto.example.com")
+        self.assertEqual(self.real_remote.device_api_key, "clave-de-prueba")
+        for name in ("BACKEND_USERNAME", "BACKEND_PASSWORD"):
+            self.assertFalse(hasattr(self.main, name))
 
     def test_payload_invalido_no_equivale_a_dia_sin_despachos(self):
         """
@@ -374,6 +401,264 @@ class SaveDispatchTest(ApiTestCase):
             "date": TODAY, "register": REGISTER, "data": [nuevo]})
 
         self.assertEqual([c["id"] for c in self.stored()["data"][0]["checkpoints"]], [3710])
+
+
+class GpsEndpointTest(ApiTestCase):
+    """
+    POST /api/gps: la lectura válida SIEMPRE actualiza la posición actual; solo
+    entra en la traza pendiente (gps, upload=False) si speed != 0 y está a 5 m
+    o más del último punto ACEPTADO.
+    """
+
+    BASE_TS = datetime(2026, 8, 25, 12, 0, 0, tzinfo=ZoneInfo("UTC"))
+
+    def gps_payload(self, latitude=-4.0, longitude=-79.0, speed=12.0, seconds=0, omit_speed=False):
+        body = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "speed": speed,
+            "timestamp": (self.BASE_TS + timedelta(seconds=seconds)).isoformat(),
+        }
+        if omit_speed:
+            body.pop("speed")
+        return body
+
+    def post(self, **kwargs):
+        response = self.client.post("/api/gps", json=self.gps_payload(**kwargs))
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def trace(self):
+        return self.client.get("/api/gps").json()
+
+    def pending(self):
+        return self.client.get("/api/gps/pending").json()
+
+    def position(self):
+        return self.client.get("/api/gps/last_position").json()
+
+    @staticmethod
+    def lon_at(meters, latitude=-4.0):
+        """Longitud a `meters` al oeste de -79.0 sobre el paralelo `latitude`."""
+        import crud
+        one = crud._haversine_meters(latitude, -79.0, latitude, -79.00001)
+        return -79.0 - 0.00001 * meters / one
+
+    # ── traza ─────────────────────────────────────────────────────────────
+
+    def test_guarda_primer_punto_y_queda_pendiente_de_subida(self):
+        body = self.post()
+
+        self.assertEqual(body["id"], 1)
+        self.assertFalse(body["upload"])
+        pending = self.pending()
+        self.assertEqual([p["id"] for p in pending], [1])
+        self.assertEqual(pending[0]["timestamp_unix"], int(self.BASE_TS.timestamp()))
+        self.assertEqual(self.position()["id"], 1)
+
+    def test_descarta_velocidad_cero_de_la_traza_pero_actualiza_la_posicion(self):
+        self.post()
+        body = self.post(longitude=self.lon_at(50), speed=0, seconds=5)
+
+        self.assertIsNone(body)
+        self.assertEqual(len(self.trace()), 1)
+        position = self.position()
+        self.assertAlmostEqual(position["longitude"], self.lon_at(50))
+        self.assertEqual(position["speed"], 0)
+        self.assertIsNone(position["id"])   # no se archivó como traza
+
+    def test_velocidad_cero_como_primer_punto_no_crea_filas(self):
+        self.assertIsNone(self.post(speed=0))
+        self.assertEqual(self.trace(), [])
+        self.assertEqual(self.position()["latitude"], -4.0)
+
+    def test_limite_de_cinco_metros(self):
+        """< 5 m se descarta; 5 m exactos y más se admiten."""
+        import crud
+        self.post()
+        original = crud._haversine_meters
+        self.addCleanup(setattr, crud, "_haversine_meters", original)
+        for i, (meters, accepted) in enumerate(((4.999, False), (5.0, True), (5.001, True)), 1):
+            with self.subTest(meters=meters):
+                crud._haversine_meters = lambda *a, m=meters: m
+                body = self.post(seconds=i)
+                self.assertEqual(body is not None, accepted)
+
+    def test_distancias_reales_por_debajo_y_por_encima(self):
+        self.post()
+        self.assertIsNone(self.post(longitude=self.lon_at(4.5), seconds=1))
+        self.assertIsNotNone(self.post(longitude=self.lon_at(5.5), seconds=2))
+        self.assertEqual(len(self.pending()), 2)
+
+    def test_compara_con_el_ultimo_punto_aceptado_no_con_el_ultimo_recibido(self):
+        """Sin esto, avanzar de 3 en 3 m nunca archivaría nada."""
+        self.post()
+        self.assertIsNone(self.post(longitude=self.lon_at(3), seconds=1))
+        # 6 m del aceptado (aunque 3 m del último recibido): entra.
+        self.assertIsNotNone(self.post(longitude=self.lon_at(6), seconds=2))
+
+    def test_velocidad_desconocida_no_cuenta_como_movimiento(self):
+        self.post()
+        # Ausente o null → pasa por el filtro de distancia como cualquiera.
+        self.assertIsNone(self.post(longitude=self.lon_at(1), speed=None, seconds=1))
+        self.assertIsNone(self.post(longitude=self.lon_at(1), omit_speed=True, seconds=2))
+        body = self.post(longitude=self.lon_at(10), omit_speed=True, seconds=3)
+        self.assertIsNotNone(body)
+        self.assertIsNone(body["speed"])   # no se convierte en 0 ni se inventa
+
+    def test_lecturas_invalidas_se_rechazan_sin_tocar_nada(self):
+        self.post()
+        before = self.position()
+        invalid = [
+            {"speed": -1},
+            {"speed": "rapido"},
+            {"latitude": 91},
+            {"longitude": -181},
+            {"latitude": None},
+            {"timestamp": "no-es-fecha"},
+            {"timestamp": "1970-01-01T00:00:00Z"},   # receptor sin hora
+        ]
+        for override in invalid:
+            with self.subTest(override=override):
+                body = self.gps_payload(longitude=self.lon_at(100), seconds=9)
+                body.update(override)
+                self.assertEqual(self.client.post("/api/gps", json=body).status_code, 422)
+        # NaN/Infinity no son JSON estándar: se envían como texto crudo.
+        for raw in ("NaN", "Infinity"):
+            with self.subTest(raw=raw):
+                text = ('{"latitude": %s, "longitude": -79.0, "speed": 1, '
+                        '"timestamp": "2026-08-25T12:00:00Z"}' % raw)
+                response = self.client.post("/api/gps", content=text,
+                                            headers={"Content-Type": "application/json"})
+                self.assertEqual(response.status_code, 422)
+        self.assertEqual(len(self.trace()), 1)
+        self.assertEqual(self.position(), before)
+
+    def test_timestamp_sin_zona_es_hora_de_ecuador(self):
+        body = self.client.post("/api/gps", json={
+            "latitude": -4.0, "longitude": -79.0, "speed": 3,
+            "timestamp": "2026-08-25T07:00:00",
+        }).json()
+        expected = int(datetime(2026, 8, 25, 7, 0, tzinfo=ZoneInfo("America/Guayaquil")).timestamp())
+        self.assertEqual(body["timestamp_unix"], expected)
+        self.assertEqual(expected, int(self.BASE_TS.timestamp()))   # 07:00 GYE == 12:00 UTC
+
+    def test_timestamp_con_zona_no_se_desplaza_aunque_sqlite_la_pierda(self):
+        body = self.client.post("/api/gps", json=self.gps_payload()).json()
+        # SQLite devuelve la hora de pared sin zona…
+        self.assertTrue(body["timestamp"].startswith("2026-08-25T12:00:00"))
+        # …pero el instante a subir quedó fijado al recibirlo.
+        self.assertEqual(body["timestamp_unix"], int(self.BASE_TS.timestamp()))
+
+    # ── cola ──────────────────────────────────────────────────────────────
+
+    def test_cola_en_orden_de_insercion_y_acotada(self):
+        for i in range(5):
+            self.post(longitude=self.lon_at(10 * i), seconds=10 - i)   # timestamps desordenados
+        ids = [p["id"] for p in self.client.get("/api/gps/pending", params={"limit": 3}).json()]
+        self.assertEqual(ids, [1, 2, 3])
+        self.assertEqual(self.client.get("/api/gps/pending", params={"limit": 0}).status_code, 422)
+
+    def test_marcar_gps_como_subido_lo_saca_de_la_cola(self):
+        created = self.post()
+
+        marked = self.client.patch(f"/api/gps/{created['id']}").json()
+
+        self.assertTrue(marked["upload"])
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(len(self.trace()), 1)   # se conserva
+        self.assertEqual(self.client.patch("/api/gps/999").status_code, 404)
+
+    def test_rechazar_saca_de_la_cola_sin_marcar_subido(self):
+        first = self.post()
+        self.post(longitude=self.lon_at(10), seconds=1)
+
+        response = self.client.post(f"/api/gps/{first['id']}/reject", json={"reason": "HTTP 400"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["upload"])
+        self.assertEqual(response.json()["upload_error"], "HTTP 400")
+        self.assertEqual([p["id"] for p in self.pending()], [2])
+        self.assertEqual(self.client.post("/api/gps/999/reject", json={"reason": "x"}).status_code, 404)
+
+    # ── concurrencia ──────────────────────────────────────────────────────
+
+    def test_lecturas_concurrentes_no_duplican_puntos(self):
+        """
+        20 hilos envían a la vez la misma posición (a centímetros): sin el
+        bloqueo, varios leerían el mismo "último punto" y se archivarían todos.
+        """
+        import threading
+        self.post()
+        barrier = threading.Barrier(20)
+        errors = []
+
+        def worker(i):
+            try:
+                barrier.wait()
+                body = self.gps_payload(longitude=self.lon_at(8) - i * 1e-8, seconds=1 + i)
+                response = self.client.post("/api/gps", json=body)
+                if response.status_code != 200:
+                    errors.append(response.status_code)
+            except Exception as e:             # pragma: no cover
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.trace()), 2)   # el primero y UNO de los 20
+
+
+class GpsConsumersTest(ApiTestCase):
+    """El filtro de la traza no debe degradar posición, pasajeros ni monitor."""
+
+    def test_pasajero_usa_la_posicion_actual_aunque_el_bus_este_detenido(self):
+        ts = "2026-08-25T12:00:00Z"
+        self.client.post("/api/gps", json={"latitude": -4.0, "longitude": -79.0, "speed": 10, "timestamp": ts})
+        # Se detiene 40 m más allá: la traza no lo archiva (speed 0).
+        self.client.post("/api/gps", json={"latitude": -4.0, "longitude": -79.00036, "speed": 0,
+                                           "timestamp": "2026-08-25T12:00:10Z"})
+
+        self.assertEqual(self.client.post("/api/passenger", json={"direction": "ENTRY", "door": "FRONT"}).status_code, 201)
+        passenger = self.client.get("/api/passenger/pending").json()[0]
+
+        self.assertAlmostEqual(passenger["longitude"], -79.00036)
+
+    def test_monitor_lee_la_posicion_actual_con_la_forma_de_siempre(self):
+        import bus_monitor
+        self.client.post("/api/gps", json={"latitude": -4.0, "longitude": -79.0, "speed": 10,
+                                           "timestamp": "2026-08-25T12:00:00Z"})
+        self.client.post("/api/gps", json={"latitude": -4.00001, "longitude": -79.0, "speed": None,
+                                           "timestamp": "2026-08-25T12:00:02Z"})
+
+        original_get = bus_monitor.requests.get
+        client = self.client
+
+        def fake_get(url, timeout=None, **kwargs):
+            return client.get(url.replace(bus_monitor.LOCAL_BACKEND, ""))
+
+        bus_monitor.requests.get = fake_get
+        self.addCleanup(setattr, bus_monitor.requests, "get", original_get)
+
+        reading = bus_monitor.fetch_gps()
+        self.assertEqual((reading.latitude, reading.longitude), (-4.00001, -79.0))
+        self.assertIsNone(reading.speed)
+
+    def test_base_antigua_sin_posicion_actual_cae_a_la_traza(self):
+        import crud
+        import models
+        db = self.main.SessionLocal()
+        try:
+            db.add(models.Gps(latitude=-4.1, longitude=-79.1, speed=3,
+                              timestamp=datetime(2026, 1, 1), upload=True))
+            db.commit()
+        finally:
+            db.close()
+        self.assertEqual(self.client.get("/api/gps/last_position").json()["latitude"], -4.1)
 
 
 class PowerEndpointsTest(ApiTestCase):
@@ -569,6 +854,81 @@ class SchemaMigrationTest(ApiTestCase):
 
         # Idempotente: una segunda pasada no hace nada.
         self.assertEqual(database.ensure_schema(engine), [])
+
+    def test_migra_una_tabla_gps_antigua_conservando_los_datos(self):
+        """
+        Tabla `gps` de antes de la cola: se agregan las columnas, las filas se
+        conservan intactas y NO se encolan (upload = 1). Una base que ya tenía
+        `upload` (versión intermedia) conserva su cola tal cual.
+        """
+        import database
+        from sqlalchemy import create_engine, text
+
+        path = os.path.join(self.tmp, "gps_antigua.db")
+        engine = create_engine(f"sqlite:///{path}")
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE gps (id INTEGER PRIMARY KEY, timestamp DATETIME NOT NULL, "
+                "latitude FLOAT NOT NULL, longitude FLOAT NOT NULL, speed FLOAT, created_at DATETIME)"))
+            for i in range(3):
+                conn.execute(text(
+                    "INSERT INTO gps (timestamp, latitude, longitude, speed) "
+                    f"VALUES ('2026-01-01 07:00:0{i}', -4.0, -79.0{i}, {i})"))
+
+        applied = database.ensure_schema(engine)
+
+        self.assertEqual(applied, ["gps.upload", "gps.timestamp_unix", "gps.upload_error"])
+        with engine.begin() as conn:
+            rows = conn.execute(text(
+                "SELECT id, longitude, speed, upload, timestamp_unix, upload_error FROM gps ORDER BY id")).fetchall()
+            indexes = [r[1] for r in conn.execute(text("PRAGMA index_list('gps')")).fetchall()]
+        self.assertEqual([tuple(r) for r in rows], [
+            (1, -79.00, 0.0, 1, None, None),
+            (2, -79.01, 1.0, 1, None, None),
+            (3, -79.02, 2.0, 1, None, None),
+        ])
+        self.assertIn("ix_gps_pending", indexes)
+        self.assertEqual(database.ensure_schema(engine), [])
+
+        # Versión intermedia: `upload` ya existía con filas pendientes.
+        path2 = os.path.join(self.tmp, "gps_intermedia.db")
+        engine2 = create_engine(f"sqlite:///{path2}")
+        with engine2.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE gps (id INTEGER PRIMARY KEY, timestamp DATETIME NOT NULL, "
+                "latitude FLOAT NOT NULL, longitude FLOAT NOT NULL, speed FLOAT, "
+                "upload BOOLEAN NOT NULL DEFAULT 0, created_at DATETIME)"))
+            conn.execute(text("INSERT INTO gps (timestamp, latitude, longitude) VALUES ('2026-01-01', -4, -79)"))
+        self.assertEqual(database.ensure_schema(engine2), ["gps.timestamp_unix", "gps.upload_error"])
+        with engine2.begin() as conn:
+            self.assertEqual(conn.execute(text("SELECT upload FROM gps")).scalar(), 0)
+
+    def test_la_app_arranca_sobre_una_base_gps_antigua(self):
+        """main.py sobre un app.db con la tabla gps vieja: migra y sirve."""
+        import sqlite3
+        for name in ("main", "crud", "models", "database", "schemas"):
+            sys.modules.pop(name, None)
+        tmp = tempfile.mkdtemp(prefix="simtra-legacy-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        con = sqlite3.connect(os.path.join(tmp, "app.db"))
+        con.execute("CREATE TABLE gps (id INTEGER PRIMARY KEY, timestamp DATETIME NOT NULL, "
+                    "latitude FLOAT NOT NULL, longitude FLOAT NOT NULL, speed FLOAT, created_at DATETIME)")
+        con.execute("INSERT INTO gps (timestamp, latitude, longitude, speed, created_at) "
+                    "VALUES ('2026-01-01 07:00:00.000000', -4.0, -79.0, 5, '2026-01-01 12:00:00.000000')")
+        con.commit()
+        con.close()
+
+        os.chdir(tmp)
+        import main
+        from fastapi.testclient import TestClient
+        with TestClient(main.app) as client:
+            self.assertEqual(client.get("/api/gps/pending").json(), [])
+            self.assertEqual(client.get("/api/gps/last_position").json()["latitude"], -4.0)
+            body = client.post("/api/gps", json={"latitude": -4.001, "longitude": -79.0, "speed": 4,
+                                                 "timestamp": "2026-08-25T12:00:00Z"}).json()
+            self.assertEqual(body["id"], 2)
+            self.assertEqual([p["id"] for p in client.get("/api/gps/pending").json()], [2])
+            self.assertEqual(len(client.get("/api/gps").json()), 2)
 
 
 if __name__ == "__main__":
