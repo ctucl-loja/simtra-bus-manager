@@ -9,9 +9,9 @@ class Gps(Base):
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     speed = Column(Float, nullable=True)
-    # Cola de subida (simtra-bus-loader). Solo contiene puntos de TRAZA: los
-    # que superaron el filtro local (velocidad distinta de 0 y >= 5 m del
-    # último punto aceptado). La posición actual vive en `gps_current`.
+    # Cola de subida (simtra-bus-loader). Contiene TODAS las lecturas válidas
+    # recibidas, incluidas las de velocidad 0 o posición repetida. La posición
+    # actual vive también en `gps_current`.
     upload = Column(Boolean, nullable=False, default=False, server_default="0")
     # Instante absoluto (Unix, segundos) calculado al recibir el punto. SQLite
     # guarda `timestamp` sin zona horaria, así que reinterpretarlo después
@@ -29,10 +29,8 @@ class GpsCurrent(Base):
     """
     Última lectura GPS VÁLIDA recibida, se haya archivado como traza o no.
 
-    Una sola fila (id = 1). Existe porque la tabla `gps` filtra (velocidad 0,
-    menos de 5 m): si la posición actual saliera de ahí, un bus detenido en una
-    parada quedaría "congelado" en el último punto en movimiento, y el monitor
-    de geocercas, las pantallas y los pasajeros verían una posición vieja.
+    Una sola fila (id = 1): acceso directo a la posición actual para el
+    monitor de geocercas, las pantallas y los pasajeros.
     """
     __tablename__ = "gps_current"
     id = Column(Integer, primary_key=True)
@@ -40,7 +38,7 @@ class GpsCurrent(Base):
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     speed = Column(Float, nullable=True)
-    # Fila de `gps` en la que se archivó esta lectura; null si se descartó.
+    # Fila de `gps` en la que se archivó esta lectura (null en filas antiguas).
     trace_id = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -100,6 +98,7 @@ class Vehicle(Base):
 class Passenger(Base):
     __tablename__ = "passenger"
     id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(String(128), nullable=True, unique=True)
     timestamp = Column(DateTime(timezone=False), nullable=False)
     direction = Column(String, nullable=False,default='ENTRY') #0 para entrada ,1 para salida , se deja numerico por si hay mas casos
     door = Column(String,nullable=False,default='FRONT')
@@ -107,4 +106,3 @@ class Passenger(Base):
     longitude = Column(Float, nullable=False)
     upload = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-

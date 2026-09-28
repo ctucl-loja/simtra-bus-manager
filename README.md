@@ -141,27 +141,20 @@ datos sensibles del propietario. No se ha modificado el backend.
    es lo que sirve `GET /api/gps/last_position` al monitor de geocercas, a las
    pantallas y a `POST /api/passenger`. Así un bus detenido en una parada no
    queda "congelado" en el último punto en movimiento.
-2. Entra en la **traza** (`gps`, `upload = false`, pendiente de subir) solo si
-   - la velocidad no es 0, y
-   - está a **5 m o más** del último punto **aceptado y guardado** (se compara
-     con la última fila de la traza, no con la última lectura recibida).
+2. **Siempre** se guarda en la **traza** (`gps`, `upload = false`, pendiente
+   de subir), aunque la velocidad sea 0 o la posición se repita. No hay filtro
+   de distancia ni de velocidad.
 
-   Menos de 5 m o velocidad 0 → no se crea ninguna fila de traza; la respuesta
-   es `null` (200).
-
-La comprobación "leer último punto → decidir → insertar" está serializada con
-un bloqueo en `crud.py`: dos lecturas simultáneas no pueden archivarse ambas
-comparándose con el mismo punto. Vale para un único proceso uvicorn (el
-servicio systemd no usa `--workers`); con varios workers haría falta un
-bloqueo en la base.
+Ambas escrituras están serializadas con un bloqueo en `crud.py` para que
+`gps_current` quede enlazado a su fila de traza.
 
 ### Velocidad
 
 | `speed` | Tratamiento |
 |---|---|
-| ausente / `null` | **Desconocida**: la lectura se acepta y se guarda `null`. No cuenta como movimiento ni como detención: entra en la traza solo si está a ≥ 5 m |
-| `0` | Detenido: actualiza la posición actual, no la traza |
-| `> 0` | Normal (filtro de 5 m) |
+| ausente / `null` | **Desconocida**: la lectura se acepta y se guarda `null`. Se guarda en la traza |
+| `0` | Detenido: se guarda en la traza como cualquier otra lectura |
+| `> 0` | Normal |
 | negativa, `NaN`, infinito, texto | Lectura inválida: `422`, no se guarda nada |
 
 También se rechazan con `422` coordenadas fuera de rango o no finitas y
@@ -252,7 +245,7 @@ de la maquina donde corre**.
 | Archivo | Que ejercita | Dependencias |
 |---|---|---|
 | Todos menos los dos siguientes | Funciones puras y servicios, con stubs (cliente device-api, loader, monitor) | Ninguna |
-| `tests/test_api_endpoints.py` | **Endpoints reales**: FastAPI + Pydantic + SQLAlchemy sobre SQLite temporal (cola GPS, filtro de 5 m, concurrencia, migracion) | `fastapi`, `sqlalchemy`, `httpx` |
+| `tests/test_api_endpoints.py` | **Endpoints reales**: FastAPI + Pydantic + SQLAlchemy sobre SQLite temporal (cola GPS, guardado de todas las lecturas, concurrencia, migracion) | `fastapi`, `sqlalchemy`, `httpx` |
 | `tests/test_gps_pipeline.py` | **Extremo a extremo**: `POST /api/gps` → `data_loader.sync_once()` → `ApiService` real con device-api simulado → marcado en SQLite | `fastapi`, `sqlalchemy`, `httpx` |
 
 Los tests unitarios **no validan los endpoints**: no importan `main.py` y no

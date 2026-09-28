@@ -310,9 +310,8 @@ class ApiService:
     def post_gps(self, data, register) -> SendResult:
         """
         `POST /api/device-api/gps/:register`. OK solo con 201, que el backend
-        devuelve tanto si archivó el punto como si lo descartó por sus reglas
-        de traza (velocidad 0, < 5 m del anterior): en ambos casos el punto
-        quedó procesado y no hay que reenviarlo.
+        devuelve tanto si archivó el punto como si lo descartó por sus propias
+        reglas: en ambos casos el punto quedó procesado y no hay que reenviarlo.
         """
         path = f"{DEVICE_API_PREFIX}/gps/{register}"
         return self._send("POST", path, f"POST {path}", data, ok_statuses=(201,))

@@ -405,9 +405,9 @@ class SaveDispatchTest(ApiTestCase):
 
 class GpsEndpointTest(ApiTestCase):
     """
-    POST /api/gps: la lectura válida SIEMPRE actualiza la posición actual; solo
-    entra en la traza pendiente (gps, upload=False) si speed != 0 y está a 5 m
-    o más del último punto ACEPTADO.
+    POST /api/gps: toda lectura válida actualiza la posición actual y se guarda
+    en la traza pendiente (gps, upload=False), sin filtro de velocidad ni de
+    distancia.
     """
 
     BASE_TS = datetime(2026, 8, 25, 12, 0, 0, tzinfo=ZoneInfo("UTC"))
@@ -440,8 +440,8 @@ class GpsEndpointTest(ApiTestCase):
     @staticmethod
     def lon_at(meters, latitude=-4.0):
         """Longitud a `meters` al oeste de -79.0 sobre el paralelo `latitude`."""
-        import crud
-        one = crud._haversine_meters(latitude, -79.0, latitude, -79.00001)
+        import math
+        one = 6371000.0 * math.radians(0.00001) * math.cos(math.radians(latitude))
         return -79.0 - 0.00001 * meters / one
 
     # ── traza ─────────────────────────────────────────────────────────────
@@ -456,55 +456,36 @@ class GpsEndpointTest(ApiTestCase):
         self.assertEqual(pending[0]["timestamp_unix"], int(self.BASE_TS.timestamp()))
         self.assertEqual(self.position()["id"], 1)
 
-    def test_descarta_velocidad_cero_de_la_traza_pero_actualiza_la_posicion(self):
+    def test_guarda_velocidad_cero_en_la_traza(self):
         self.post()
         body = self.post(longitude=self.lon_at(50), speed=0, seconds=5)
 
-        self.assertIsNone(body)
-        self.assertEqual(len(self.trace()), 1)
+        self.assertIsNotNone(body)
+        self.assertEqual(body["speed"], 0)
+        self.assertEqual(len(self.trace()), 2)
         position = self.position()
         self.assertAlmostEqual(position["longitude"], self.lon_at(50))
-        self.assertEqual(position["speed"], 0)
-        self.assertIsNone(position["id"])   # no se archivó como traza
+        self.assertEqual(position["id"], body["id"])
 
-    def test_velocidad_cero_como_primer_punto_no_crea_filas(self):
-        self.assertIsNone(self.post(speed=0))
-        self.assertEqual(self.trace(), [])
+    def test_velocidad_cero_como_primer_punto_se_guarda(self):
+        self.assertIsNotNone(self.post(speed=0))
+        self.assertEqual(len(self.trace()), 1)
         self.assertEqual(self.position()["latitude"], -4.0)
 
-    def test_limite_de_cinco_metros(self):
-        """< 5 m se descarta; 5 m exactos y más se admiten."""
-        import crud
+    def test_guarda_puntos_repetidos_y_cercanos(self):
         self.post()
-        original = crud._haversine_meters
-        self.addCleanup(setattr, crud, "_haversine_meters", original)
-        for i, (meters, accepted) in enumerate(((4.999, False), (5.0, True), (5.001, True)), 1):
-            with self.subTest(meters=meters):
-                crud._haversine_meters = lambda *a, m=meters: m
-                body = self.post(seconds=i)
-                self.assertEqual(body is not None, accepted)
+        self.assertIsNotNone(self.post(seconds=1))                        # misma posición
+        self.assertIsNotNone(self.post(speed=0, seconds=2))               # misma posición, detenido
+        self.assertIsNotNone(self.post(longitude=self.lon_at(1), seconds=3))
+        self.assertEqual(len(self.pending()), 4)
 
-    def test_distancias_reales_por_debajo_y_por_encima(self):
+    def test_velocidad_desconocida_se_guarda_como_null(self):
         self.post()
-        self.assertIsNone(self.post(longitude=self.lon_at(4.5), seconds=1))
-        self.assertIsNotNone(self.post(longitude=self.lon_at(5.5), seconds=2))
-        self.assertEqual(len(self.pending()), 2)
-
-    def test_compara_con_el_ultimo_punto_aceptado_no_con_el_ultimo_recibido(self):
-        """Sin esto, avanzar de 3 en 3 m nunca archivaría nada."""
-        self.post()
-        self.assertIsNone(self.post(longitude=self.lon_at(3), seconds=1))
-        # 6 m del aceptado (aunque 3 m del último recibido): entra.
-        self.assertIsNotNone(self.post(longitude=self.lon_at(6), seconds=2))
-
-    def test_velocidad_desconocida_no_cuenta_como_movimiento(self):
-        self.post()
-        # Ausente o null → pasa por el filtro de distancia como cualquiera.
-        self.assertIsNone(self.post(longitude=self.lon_at(1), speed=None, seconds=1))
-        self.assertIsNone(self.post(longitude=self.lon_at(1), omit_speed=True, seconds=2))
-        body = self.post(longitude=self.lon_at(10), omit_speed=True, seconds=3)
+        self.assertIsNotNone(self.post(longitude=self.lon_at(1), speed=None, seconds=1))
+        body = self.post(longitude=self.lon_at(1), omit_speed=True, seconds=2)
         self.assertIsNotNone(body)
         self.assertIsNone(body["speed"])   # no se convierte en 0 ni se inventa
+        self.assertEqual(len(self.trace()), 3)
 
     def test_lecturas_invalidas_se_rechazan_sin_tocar_nada(self):
         self.post()
@@ -583,11 +564,8 @@ class GpsEndpointTest(ApiTestCase):
 
     # ── concurrencia ──────────────────────────────────────────────────────
 
-    def test_lecturas_concurrentes_no_duplican_puntos(self):
-        """
-        20 hilos envían a la vez la misma posición (a centímetros): sin el
-        bloqueo, varios leerían el mismo "último punto" y se archivarían todos.
-        """
+    def test_lecturas_concurrentes_se_guardan_todas(self):
+        """20 hilos envían a la vez casi la misma posición: se guardan las 20."""
         import threading
         self.post()
         barrier = threading.Barrier(20)
@@ -610,16 +588,16 @@ class GpsEndpointTest(ApiTestCase):
             t.join()
 
         self.assertEqual(errors, [])
-        self.assertEqual(len(self.trace()), 2)   # el primero y UNO de los 20
+        self.assertEqual(len(self.trace()), 21)   # el primero y los 20
 
 
 class GpsConsumersTest(ApiTestCase):
-    """El filtro de la traza no debe degradar posición, pasajeros ni monitor."""
+    """Posición actual para pasajeros y monitor."""
 
     def test_pasajero_usa_la_posicion_actual_aunque_el_bus_este_detenido(self):
         ts = "2026-08-25T12:00:00Z"
         self.client.post("/api/gps", json={"latitude": -4.0, "longitude": -79.0, "speed": 10, "timestamp": ts})
-        # Se detiene 40 m más allá: la traza no lo archiva (speed 0).
+        # Se detiene 40 m más allá (speed 0).
         self.client.post("/api/gps", json={"latitude": -4.0, "longitude": -79.00036, "speed": 0,
                                            "timestamp": "2026-08-25T12:00:10Z"})
 
@@ -829,8 +807,160 @@ class WifiEndpointTest(ApiTestCase):
         self.assertEqual(self.received, [("ABIERTA", None)])
 
 
+class PassengerEventTest(ApiTestCase):
+    """
+    POST /api/passenger desde simtra-counter: idempotente por event_id, con el
+    timestamp real del cruce, y la ubicación la decide SIEMPRE este servicio.
+    """
+
+    # Traza de un día anterior: T0, T0+60 s, T0+120 s y una lectura final una
+    # hora después, que queda como posición actual.
+    T0 = datetime(2026, 8, 25, 12, 0, 0, tzinfo=ZoneInfo("UTC"))
+    TRACE = ((0, -79.000), (60, -79.001), (120, -79.002), (3600, -79.900))
+    CURRENT_LONGITUDE = -79.900
+
+    def setUp(self):
+        super().setUp()
+        for seconds, longitude in self.TRACE:
+            response = self.client.post("/api/gps", json={
+                "latitude": -4.0, "longitude": longitude, "speed": 10,
+                "timestamp": (self.T0 + timedelta(seconds=seconds)).isoformat()})
+            self.assertEqual(response.status_code, 200, response.text)
+
+    def body(self, event_id="c0ffee-1", timestamp=None, direction="ENTRY", door="FRONT"):
+        if timestamp is None:
+            timestamp = datetime.now(ZoneInfo("UTC"))
+        return {"event_id": event_id, "timestamp": timestamp.isoformat(),
+                "direction": direction, "door": door}
+
+    def post(self, body):
+        return self.client.post("/api/passenger", json=body)
+
+    def stored(self):
+        return self.client.get("/api/passenger/pending").json()
+
+    def test_event_id_nuevo_crea_el_pasajero(self):
+        response = self.post(self.body())
+
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["event_id"], "c0ffee-1")
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_reintento_con_el_mismo_event_id_no_duplica(self):
+        body = self.body()
+        first = self.post(body)
+        again = self.post(body)
+
+        self.assertEqual(again.status_code, 201, again.text)
+        self.assertEqual(again.json()["id"], first.json()["id"])
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_mismo_event_id_con_datos_distintos_es_409(self):
+        body = self.body()
+        self.assertEqual(self.post(body).status_code, 201)
+
+        other_ts = datetime.fromisoformat(body["timestamp"]) + timedelta(seconds=5)
+        for changed in ({"direction": "EXIT"}, {"door": "BACK"},
+                        {"timestamp": other_ts.isoformat()}):
+            with self.subTest(changed=changed):
+                self.assertEqual(self.post({**body, **changed}).status_code, 409)
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_timestamp_viejo_usa_el_gps_historico_mas_cercano(self):
+        # 50 s después de T0: el punto más cercano es T0+60 s, no la posición actual.
+        response = self.post(self.body(timestamp=self.T0 + timedelta(seconds=50)))
+
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertAlmostEqual(response.json()["longitude"], -79.001)
+        # Guarda la hora del cruce (Ecuador, sin zona), no la de recepción.
+        self.assertEqual(response.json()["timestamp"], "2026-08-25T07:00:50")
+
+    def test_timestamp_reciente_usa_la_posicion_actual(self):
+        now = datetime.now(ZoneInfo("UTC"))
+        for i, age in enumerate((0, 170)):
+            with self.subTest(age=age):
+                response = self.post(self.body(event_id=f"reciente-{i}",
+                                               timestamp=now - timedelta(seconds=age)))
+                self.assertEqual(response.status_code, 201, response.text)
+                self.assertAlmostEqual(response.json()["longitude"], self.CURRENT_LONGITUDE)
+
+    def test_pasados_tres_minutos_se_busca_en_el_historial(self):
+        import crud
+        self.assertEqual(crud.PASSENGER_CURRENT_GPS_MAX_AGE_SECONDS, 180)
+        calls = []
+        original = crud._passenger_historical_gps
+        self.addCleanup(setattr, crud, "_passenger_historical_gps", original)
+        crud._passenger_historical_gps = lambda db, ts: calls.append(ts) or original(db, ts)
+
+        old = datetime.now(ZoneInfo("UTC")) - timedelta(seconds=200)
+        self.assertEqual(self.post(self.body(timestamp=old)).status_code, 201)
+        self.assertEqual(len(calls), 1)
+
+    def test_latitude_y_longitude_no_se_aceptan(self):
+        body = {**self.body(), "latitude": -2.0, "longitude": -80.0}
+        self.assertEqual(self.post(body).status_code, 422)
+        self.assertEqual(self.stored(), [])
+
+    def test_alias_id_se_acepta_como_event_id(self):
+        body = self.body()
+        body["id"] = body.pop("event_id")
+        response = self.post(body)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["event_id"], "c0ffee-1")
+
+    def test_sin_gps_utilizable_se_guarda_igual_y_lo_avisa(self):
+        from database import engine
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM gps"))
+            conn.execute(text("DELETE FROM gps_current"))
+
+        import logging
+        logging.disable(logging.NOTSET)          # _bootstrap silencia los logs
+        self.addCleanup(logging.disable, logging.CRITICAL)
+        with self.assertLogs("simtra", level="WARNING") as logs:
+            response = self.post(self.body(event_id="sin-gps", timestamp=self.T0))
+
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual((response.json()["latitude"], response.json()["longitude"]), (0.0, 0.0))
+        self.assertIn("sin-gps", "\n".join(logs.output))
+
+
 class SchemaMigrationTest(ApiTestCase):
     """`database.ensure_schema` agrega columnas nuevas en una base ya existente."""
+
+    def test_agrega_event_id_unico_a_una_tabla_passenger_antigua(self):
+        import database
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.exc import IntegrityError
+
+        path = os.path.join(self.tmp, "passenger_antigua.db")
+        engine = create_engine(f"sqlite:///{path}")
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE passenger (id INTEGER PRIMARY KEY, timestamp DATETIME NOT NULL, "
+                "direction VARCHAR NOT NULL, door VARCHAR NOT NULL, latitude FLOAT NOT NULL, "
+                "longitude FLOAT NOT NULL, upload BOOLEAN NOT NULL, created_at DATETIME)"))
+            for _ in range(2):
+                conn.execute(text(
+                    "INSERT INTO passenger (timestamp, direction, door, latitude, longitude, upload) "
+                    "VALUES ('2026-01-01 07:00:00', 'ENTRY', 'FRONT', -4, -79, 0)"))
+
+        self.assertEqual(database.ensure_schema(engine), ["passenger.event_id"])
+        with engine.begin() as conn:
+            # Las filas viejas quedan con NULL, que no choca con el índice único.
+            self.assertEqual(conn.execute(text(
+                "SELECT COUNT(*) FROM passenger WHERE event_id IS NULL")).scalar(), 2)
+            indexes = [r[1] for r in conn.execute(text("PRAGMA index_list('passenger')")).fetchall()]
+        self.assertIn("ix_passenger_event_id", indexes)
+
+        insert = text("INSERT INTO passenger (event_id, timestamp, direction, door, latitude, "
+                      "longitude, upload) VALUES ('dup', '2026-01-01', 'ENTRY', 'FRONT', 0, 0, 0)")
+        with engine.begin() as conn:
+            conn.execute(insert)
+        with self.assertRaises(IntegrityError), engine.begin() as conn:
+            conn.execute(insert)
+        self.assertEqual(database.ensure_schema(engine), [])
 
     def test_agrega_revision_a_una_tabla_antigua(self):
         import database

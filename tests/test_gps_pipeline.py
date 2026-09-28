@@ -139,9 +139,9 @@ class GpsPipelineTest(unittest.TestCase):
 
     def seed(self):
         self.post_gps(-79.0, "2026-08-25T12:00:00Z")
-        self.post_gps(-79.00001, "2026-08-25T12:00:01Z")            # ~1 m: descartado
+        self.post_gps(-79.00001, "2026-08-25T12:00:01Z")            # ~1 m: se guarda igual
         self.post_gps(-79.0001, "2026-08-25T07:00:02")              # sin zona = GYE
-        self.post_gps(-79.0002, "2026-08-25T12:00:03+00:00", speed=0)  # detenido: descartado
+        self.post_gps(-79.0002, "2026-08-25T12:00:03+00:00", speed=0)  # detenido: se guarda igual
 
     def test_subida_exitosa_marca_en_sqlite(self):
         self.seed()
@@ -149,7 +149,8 @@ class GpsPipelineTest(unittest.TestCase):
         self.assertTrue(data_loader.sync_once())
 
         base = int(datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc).timestamp())
-        self.assertEqual([p["timestamp"] for p in self.remote.received], [base, base + 2])
+        self.assertEqual([p["timestamp"] for p in self.remote.received],
+                         [base, base + 1, base + 2, base + 3])
         self.assertEqual(self.remote.received[0],
                          {"timestamp": base, "latitude": -4.0, "longitude": -79.0, "speed": 10.0})
         self.assertEqual(self.client.get("/api/gps/pending").json(), [])
@@ -160,19 +161,19 @@ class GpsPipelineTest(unittest.TestCase):
         for mode in ("down",):
             self.remote.mode = mode
             self.assertFalse(data_loader.sync_once())
-        self.assertEqual(len(self.client.get("/api/gps/pending").json()), 2)
+        self.assertEqual(len(self.client.get("/api/gps/pending").json()), 4)
 
         # Vuelve la red: se suben en orden.
         self.remote.mode = "ok"
         data_loader.sync_once()
-        self.assertEqual(len(self.remote.received), 2)
+        self.assertEqual(len(self.remote.received), 4)
         self.assertEqual(self.client.get("/api/gps/pending").json(), [])
 
     def test_api_key_rechazada_conserva_pendientes(self):
         self.seed()
         data_loader.simtra.device_api_key = "otra-clave"
         self.assertFalse(data_loader.sync_once())
-        self.assertEqual(len(self.client.get("/api/gps/pending").json()), 2)
+        self.assertEqual(len(self.client.get("/api/gps/pending").json()), 4)
         self.assertEqual(self.remote.received, [])
 
     def test_rechazo_400_saca_el_punto_sin_marcarlo_subido(self):
@@ -187,13 +188,13 @@ class GpsPipelineTest(unittest.TestCase):
         self.seed()
         self.local.fail_marks = True
         data_loader.sync_once()
-        self.assertEqual(len(self.remote.received), 2)
-        self.assertEqual(len(self.client.get("/api/gps/pending").json()), 2)
+        self.assertEqual(len(self.remote.received), 4)
+        self.assertEqual(len(self.client.get("/api/gps/pending").json()), 4)
 
         self.local.fail_marks = False
         data_loader.sync_once()
 
-        self.assertEqual(len(self.remote.received), 2)   # sin reenvío
+        self.assertEqual(len(self.remote.received), 4)   # sin reenvío
         self.assertEqual(self.client.get("/api/gps/pending").json(), [])
 
 

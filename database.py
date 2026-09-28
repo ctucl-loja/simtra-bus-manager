@@ -21,6 +21,7 @@ Base = declarative_base()
 # es todo lo que hace falta aquí. Cada entrada es idempotente: si la columna ya
 # está, no se toca nada.
 ADDED_COLUMNS = {
+    "passenger": [("event_id", "VARCHAR(128)")],
     # Revisión del despacho: se incrementa en cada escritura. Es el número con
     # el que simtra-bus-monitor sabe que la pantalla recargó el itinerario y
     # debe adoptarlo, y el que impide que una carga antigua del monitor pise
@@ -51,6 +52,8 @@ BACKFILL = {
 
 # Índices que `create_all` no crea en tablas existentes. Idempotentes.
 ADDED_INDEXES = [
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_passenger_event_id ON passenger (event_id)",
+    "CREATE INDEX IF NOT EXISTS ix_gps_timestamp_unix ON gps (timestamp_unix)",
     # La cola pendiente se consulta cada ciclo del loader; sin índice sería un
     # recorrido completo de una tabla que crece ~30 000 filas por jornada.
     "CREATE INDEX IF NOT EXISTS ix_gps_pending ON gps (upload, upload_error, id)",

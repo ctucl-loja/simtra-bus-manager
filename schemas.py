@@ -1,4 +1,4 @@
-from pydantic import BaseModel,Field,field_validator
+from pydantic import BaseModel,ConfigDict,Field,field_validator,AliasChoices
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from enum import Enum
@@ -19,9 +19,7 @@ class GPSDataCreate(BaseModel):
     longitude: float = Field(..., allow_inf_nan=False, ge=-180, le=180)
     # Velocidad:
     #   ausente / null → DESCONOCIDA: la lectura se acepta y se guarda null.
-    #                    No cuenta como movimiento ni como detención; el punto
-    #                    entra en la traza solo si está a >= 5 m del anterior.
-    #   0              → detenido: actualiza la posición actual, no la traza.
+    #   0              → detenido: se guarda igual que cualquier otra lectura.
     #   negativa, NaN, infinito, texto → lectura inválida (422), no se guarda.
     speed: float | None = Field(None, allow_inf_nan=False, ge=0)
     # Con zona horaria → instante exacto. Sin zona → hora de pared de
@@ -58,7 +56,7 @@ class GPSPositionResponse(BaseModel):
     """
     Posición actual (GET /api/gps/last_position). Misma forma de siempre para
     el monitor y las pantallas; `id` es la fila de traza en la que se archivó
-    la lectura y es null cuando el filtro la descartó (bus detenido o < 5 m).
+    la lectura (null solo en datos anteriores a que se guardaran todas).
     """
     id: int | None = None
     latitude: float
@@ -82,12 +80,27 @@ class CheckPointCreate(BaseModel):
 
 
 class PassengerCreate(BaseModel):
+    # latitude/longitude NO se aceptan: la ubicación la decide siempre este
+    # servicio a partir de su propio GPS (ver crud.create_passenger).
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str | None = Field(None, min_length=1, max_length=128,
+                                validation_alias=AliasChoices("event_id", "id"))
+    timestamp: datetime | None = None
     direction: str
     door:str
+
+    @field_validator("event_id", mode="before")
+    @classmethod
+    def normalize_event_id(cls, value):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+        return value.strip() if isinstance(value, str) else value
 
 
 class PassengerResponse(BaseModel):
     id: int
+    event_id: str | None = None
     timestamp: datetime
     direction: str
     door:str

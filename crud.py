@@ -1,4 +1,6 @@
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from fastapi import HTTPException
 from sqlalchemy.orm.attributes import flag_modified
 from types import SimpleNamespace
 from typing import Optional
@@ -9,27 +11,12 @@ from datetime import datetime,time
 
 from zoneinfo import ZoneInfo
 import logging
-import math
 import threading
 
 log = logging.getLogger("simtra")
 
 ECUADOR_TZ = ZoneInfo("America/Guayaquil")
-MIN_GPS_DISTANCE_METERS = 5.0
-
-
-def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    radius = 6371000.0
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
-
-    a = (
-        math.sin(delta_phi / 2) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
-    )
-    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+PASSENGER_CURRENT_GPS_MAX_AGE_SECONDS = 180
 
 
 def gps_unix_seconds(value: datetime) -> int:
@@ -47,61 +34,33 @@ def gps_unix_seconds(value: datetime) -> int:
 
 
 def _last_trace_point(db: Session) -> Optional[Gps]:
-    """Último punto ACEPTADO y persistido en la traza (orden de inserción)."""
+    """Último punto persistido en la traza (orden de inserción)."""
     return db.query(Gps).order_by(Gps.id.desc()).first()
 
 
-def _trace_rejection(previous: Optional[Gps], data: GPSDataCreate) -> Optional[str]:
-    """
-    Motivo por el que la lectura no entra en la traza, o None si entra.
-
-    Velocidad desconocida (null) no es evidencia de movimiento: pasa por el
-    mismo filtro de distancia que cualquier otra lectura.
-    """
-    if data.speed == 0:
-        return "velocidad 0"
-    if previous is None:
-        return None
-    distance = _haversine_meters(
-        previous.latitude, previous.longitude, data.latitude, data.longitude,
-    )
-    if distance < MIN_GPS_DISTANCE_METERS:
-        return f"{distance:.2f} m del último punto aceptado (mínimo {MIN_GPS_DISTANCE_METERS:.0f} m)"
-    return None
-
-
-# Serializa consultar-el-último-punto → decidir → insertar. FastAPI atiende los
-# endpoints síncronos en un pool de hilos: sin esto, dos lecturas casi
-# simultáneas podrían compararse ambas con el mismo "último punto" y archivarse
-# las dos aunque estén a centímetros. La API corre como UN proceso uvicorn
-# (README → systemd); con varios workers haría falta un bloqueo en la base.
+# Serializa las escrituras de `gps` y `gps_current`: FastAPI atiende los
+# endpoints síncronos en un pool de hilos y la fila única de la posición actual
+# debe quedar enlazada al punto de traza de la misma lectura.
 _GPS_WRITE_LOCK = threading.Lock()
 
 
-def create_gps_data(db: Session, data: GPSDataCreate) -> Optional[Gps]:
+def create_gps_data(db: Session, data: GPSDataCreate) -> Gps:
     """
     Registra una lectura GPS válida.
 
-    Siempre actualiza la posición actual (`gps_current`). Solo la archiva en la
-    traza pendiente de subida (`gps`, upload=False) si la velocidad no es 0 y
-    está a 5 m o más del último punto aceptado. Devuelve la fila de traza
-    creada, o None si la lectura se descartó de la traza.
+    Toda lectura se archiva en la traza pendiente de subida (`gps`,
+    upload=False), aunque la velocidad sea 0 o repita la posición anterior, y
+    actualiza la posición actual (`gps_current`).
     """
     with _GPS_WRITE_LOCK:
         try:
-            reason = _trace_rejection(_last_trace_point(db), data)
-
-            gps = None
-            if reason is None:
-                gps = Gps(
-                    **data.model_dump(),
-                    upload=False,
-                    timestamp_unix=gps_unix_seconds(data.timestamp),
-                )
-                db.add(gps)
-                db.flush()   # asigna el id para enlazarlo desde gps_current
-            else:
-                log.debug("[GPS] Lectura fuera de la traza: %s", reason)
+            gps = Gps(
+                **data.model_dump(),
+                upload=False,
+                timestamp_unix=gps_unix_seconds(data.timestamp),
+            )
+            db.add(gps)
+            db.flush()   # asigna el id para enlazarlo desde gps_current
 
             current = db.get(GpsCurrent, 1)
             if current is None:
@@ -111,7 +70,7 @@ def create_gps_data(db: Session, data: GPSDataCreate) -> Optional[Gps]:
             current.latitude = data.latitude
             current.longitude = data.longitude
             current.speed = data.speed
-            current.trace_id = gps.id if gps else None
+            current.trace_id = gps.id
             current.created_at = datetime.now(timezone.utc)
 
             db.commit()
@@ -119,8 +78,7 @@ def create_gps_data(db: Session, data: GPSDataCreate) -> Optional[Gps]:
             db.rollback()
             raise
 
-    if gps is not None:
-        db.refresh(gps)
+    db.refresh(gps)
     return gps
 
 
@@ -224,11 +182,48 @@ def upload_pending_checkpoints(db: Session, id: int):
 
     return checkpoint
 
+def _existing_passenger(db: Session, data: PassengerCreate) -> Optional[Passenger]:
+    if data.event_id is None:
+        return None
+    passenger = db.query(Passenger).filter(Passenger.event_id == data.event_id).first()
+    if passenger is not None:
+        timestamp = data.timestamp
+        if timestamp is not None:
+            timestamp = (timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=ECUADOR_TZ))
+            timestamp = timestamp.astimezone(ECUADOR_TZ).replace(tzinfo=None)
+        if (passenger.direction != data.direction or passenger.door != data.door
+                or (timestamp is not None and passenger.timestamp != timestamp)):
+            raise HTTPException(409, "El ID ya pertenece a un evento diferente")
+    return passenger
+
+
+def _passenger_historical_gps(db: Session, timestamp: datetime) -> Optional[Gps]:
+    # Dos consultas indexadas equivalen al mas cercano de todo el historial.
+    # Las filas antiguas sin Unix no tienen zona de origen conocida.
+    target = timestamp.timestamp()
+    before = db.query(Gps).filter(Gps.timestamp_unix <= target).order_by(
+        Gps.timestamp_unix.desc(), Gps.id.desc()).first()
+    after = db.query(Gps).filter(Gps.timestamp_unix > target).order_by(
+        Gps.timestamp_unix.asc(), Gps.id.asc()).first()
+    candidates = [point for point in (before, after) if point is not None]
+    return min(candidates, key=lambda point: abs(point.timestamp_unix - target), default=None)
+
+
 def create_passenger(db: Session, data: PassengerCreate) -> Passenger:
-    # Misma "última posición" que get_last_position (posición actual, no la
-    # traza filtrada): un pasajero sube con el bus DETENIDO, justo la lectura
-    # que la traza descarta por velocidad 0.
-    last = get_last_position(db)
+    existing = _existing_passenger(db, data)
+    if existing is not None:
+        log.info("[PASSENGER] Evento %s ya registrado (id %s): no se duplica",
+                 data.event_id, existing.id)
+        return existing
+    now = datetime.now(ECUADOR_TZ)
+    timestamp = data.timestamp or now
+    timestamp = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=ECUADOR_TZ)
+    timestamp = timestamp.astimezone(ECUADOR_TZ)
+    # Evento reciente (o sin timestamp): posición actual, igual que
+    # get_last_position. Evento viejo (reenvío tras una caída): el punto de la
+    # traza más cercano al instante real del cruce.
+    historical = (now - timestamp).total_seconds() > PASSENGER_CURRENT_GPS_MAX_AGE_SECONDS
+    last = _passenger_historical_gps(db, timestamp) if historical else get_last_position(db)
     gps = SimpleNamespace(**last) if isinstance(last, dict) else last
 
     if gps is None:
@@ -236,19 +231,32 @@ def create_passenger(db: Session, data: PassengerCreate) -> Passenger:
         # guardarlo sin ubicación. Pero queda dicho en el log, porque (0, 0) es
         # una coordenada real y no debe confundirse con una posición medida.
         log.warning(
-            "[PASSENGER] Todavía no hay ninguna lectura GPS: el pasajero se "
-            "guarda con coordenadas (0, 0), que NO son una posición real"
+            "[PASSENGER] Evento %s (%s): no hay lectura GPS %s utilizable; se "
+            "guarda con coordenadas (0, 0), que NO son una posición real",
+            data.event_id, timestamp.isoformat(), "histórica" if historical else "actual",
         )
+    elif historical:
+        log.info("[PASSENGER] Evento %s de %s: se usa el GPS histórico más cercano (%s)",
+                 data.event_id, timestamp.isoformat(), gps.timestamp)
 
     passenger = Passenger(
-        timestamp=datetime.now(ECUADOR_TZ),
+        event_id=data.event_id,
+        timestamp=timestamp.replace(tzinfo=None),
         direction=data.direction,
         door=data.door,
         latitude=gps.latitude if gps else 0.0,
         longitude=gps.longitude if gps else 0.0,
     )
     db.add(passenger)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # Otro worker pudo guardar el mismo evento entre la consulta y el INSERT.
+        existing = _existing_passenger(db, data)
+        if existing is not None:
+            return existing
+        raise
     db.refresh(passenger)
     return passenger
 

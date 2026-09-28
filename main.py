@@ -13,7 +13,7 @@ import models
 import database
 from database import engine, SessionLocal
 from schemas import (
-    GPSDataCreate, GPSDataResponse, GPSPositionResponse, GPSRejectRequest, CheckPointCreate, PassengerCreate, DispatchCreate,
+    GPSDataCreate, GPSDataResponse, GPSPositionResponse, GPSRejectRequest, CheckPointCreate, PassengerCreate, PassengerResponse, DispatchCreate,
     DispatchResponse, DispatchCheckpointUpdate, DispatchRefreshResponse, EventCreate,
     EventResponse, VehicleCreate, VehicleResponse, NetworkInfoResponse,
     PowerActionResponse, WifiConnectRequest, WifiConnectResponse,
@@ -94,7 +94,7 @@ def get_db():
 
 #endpoints gps
 
-@app.post("/api/gps", response_model=Optional[GPSDataResponse])
+@app.post("/api/gps", response_model=GPSDataResponse)
 def create_gps(data: GPSDataCreate, db: Session = Depends(get_db)):
     return crud.create_gps_data(db, data)
 
@@ -152,7 +152,7 @@ def get_pending_checkpoint(db: Session = Depends(get_db)):
 
 #endpoints passengers
 
-@app.post("/api/passenger", response_model=PassengerCreate, status_code=201)
+@app.post("/api/passenger", response_model=PassengerResponse, status_code=201)
 def save_passenger(data: PassengerCreate, db: Session = Depends(get_db)):
     return crud.create_passenger(db, data)
 
