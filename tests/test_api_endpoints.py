@@ -467,6 +467,14 @@ class GpsEndpointTest(ApiTestCase):
         self.assertAlmostEqual(position["longitude"], self.lon_at(50))
         self.assertEqual(position["id"], body["id"])
 
+    def test_lectura_fuera_de_orden_se_archiva_sin_mover_la_posicion_actual(self):
+        self.post(longitude=self.lon_at(100), seconds=10)
+        self.post(longitude=self.lon_at(0), seconds=5)        # llega tarde
+        self.assertAlmostEqual(self.position()["longitude"], self.lon_at(100))
+        self.assertEqual(len(self.pending()), 2)              # la traza la conserva
+        self.post(longitude=self.lon_at(200), seconds=10)     # misma hora: sí actualiza
+        self.assertAlmostEqual(self.position()["longitude"], self.lon_at(200))
+
     def test_velocidad_cero_como_primer_punto_se_guarda(self):
         self.assertIsNotNone(self.post(speed=0))
         self.assertEqual(len(self.trace()), 1)
@@ -839,6 +847,18 @@ class PassengerEventTest(ApiTestCase):
     def stored(self):
         return self.client.get("/api/passenger/pending").json()
 
+    def test_rechazar_saca_de_la_cola_sin_marcar_subido(self):
+        first = self.post(self.body(event_id="a")).json()
+        second = self.post(self.body(event_id="b")).json()
+
+        response = self.client.post(f"/api/passenger/{first['id']}/reject", json={"reason": "HTTP 400"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["upload"])
+        self.assertEqual(response.json()["upload_error"], "HTTP 400")
+        self.assertEqual([p["id"] for p in self.stored()], [second["id"]])
+        self.assertEqual(self.client.post("/api/passenger/999/reject", json={"reason": "x"}).status_code, 404)
+
     def test_event_id_nuevo_crea_el_pasajero(self):
         response = self.post(self.body())
 
@@ -926,8 +946,74 @@ class PassengerEventTest(ApiTestCase):
         self.assertIn("sin-gps", "\n".join(logs.output))
 
 
+class VersionEndpointTest(ApiTestCase):
+    def test_version_sale_del_archivo_version(self):
+        from pathlib import Path
+        raw = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+        body = self.client.get("/api/version").json()
+        self.assertEqual(f"{body['version']} {body['label']}", raw)
+        self.assertEqual(body, {"version": "1.5.2", "label": "LTS"})
+
+    def test_version_sin_etiqueta_o_sin_archivo(self):
+        import main
+        path = Path(self.tmp) / "VERSION"
+        path.write_text("2.0.0\n")
+        self.assertEqual(main.read_version(path), {"version": "2.0.0", "label": None})
+        self.assertEqual(main.read_version(Path(self.tmp) / "no-existe"),
+                         {"version": "desconocida", "label": None})
+
+
+class CheckpointQueueTest(ApiTestCase):
+    """Cola local de marcaciones: idempotente por checkpoint_id y con rechazo."""
+
+    def test_rechazar_saca_de_la_cola_sin_marcar_subida(self):
+        body = {"checkpoint_id": 3701, "name": "Y DE CARIGÁN", "timestamp": "06:10:00"}
+        first = self.client.post("/api/checkpoint", json=body).json()
+        # Reintento del monitor tras una respuesta perdida: no se duplica.
+        self.assertEqual(self.client.post("/api/checkpoint", json=body).json()["id"], first["id"])
+        self.client.post("/api/checkpoint", json={**body, "checkpoint_id": 3702})
+
+        response = self.client.post(f"/api/checkpoint/{first['id']}/reject",
+                                    json={"reason": "HTTP 404"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["upload"])
+        self.assertEqual(response.json()["upload_error"], "HTTP 404")
+        pending = self.client.get("/api/checkpoint/pending").json()
+        self.assertEqual([c["checkpoint_id"] for c in pending], [3702])
+        self.assertEqual(self.client.post("/api/checkpoint/999/reject",
+                                          json={"reason": "x"}).status_code, 404)
+
+
 class SchemaMigrationTest(ApiTestCase):
     """`database.ensure_schema` agrega columnas nuevas en una base ya existente."""
+
+    def test_agrega_orden_de_posicion_y_rechazo_de_marcaciones(self):
+        import database
+        from sqlalchemy import create_engine, text
+
+        path = os.path.join(self.tmp, "v151.db")
+        engine = create_engine(f"sqlite:///{path}")
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE gps_current (id INTEGER PRIMARY KEY, timestamp DATETIME NOT NULL, "
+                "latitude FLOAT NOT NULL, longitude FLOAT NOT NULL, speed FLOAT, trace_id INTEGER, "
+                "created_at DATETIME)"))
+            conn.execute(text(
+                "CREATE TABLE checkpoint (id INTEGER PRIMARY KEY, checkpoint_id INTEGER NOT NULL, "
+                "name VARCHAR NOT NULL, timestamp VARCHAR NOT NULL, upload BOOLEAN NOT NULL, "
+                "created_at DATETIME)"))
+            conn.execute(text(
+                "INSERT INTO checkpoint (checkpoint_id, name, timestamp, upload) "
+                "VALUES (3701, 'X', '06:10:00', 0)"))
+
+        self.assertEqual(sorted(database.ensure_schema(engine)),
+                         ["checkpoint.upload_error", "gps_current.timestamp_unix"])
+        with engine.begin() as conn:
+            # La marcación existente sigue pendiente (upload_error NULL).
+            self.assertEqual(conn.execute(text(
+                "SELECT COUNT(*) FROM checkpoint WHERE upload_error IS NULL")).scalar(), 1)
+        self.assertEqual(database.ensure_schema(engine), [])
 
     def test_agrega_event_id_unico_a_una_tabla_passenger_antigua(self):
         import database
@@ -946,7 +1032,7 @@ class SchemaMigrationTest(ApiTestCase):
                     "INSERT INTO passenger (timestamp, direction, door, latitude, longitude, upload) "
                     "VALUES ('2026-01-01 07:00:00', 'ENTRY', 'FRONT', -4, -79, 0)"))
 
-        self.assertEqual(database.ensure_schema(engine), ["passenger.event_id"])
+        self.assertEqual(database.ensure_schema(engine), ["passenger.event_id", "passenger.upload_error"])
         with engine.begin() as conn:
             # Las filas viejas quedan con NULL, que no choca con el índice único.
             self.assertEqual(conn.execute(text(

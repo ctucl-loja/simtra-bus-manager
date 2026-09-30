@@ -40,6 +40,9 @@ class GpsCurrent(Base):
     speed = Column(Float, nullable=True)
     # Fila de `gps` en la que se archivó esta lectura (null en filas antiguas).
     trace_id = Column(Integer, nullable=True)
+    # Instante Unix de la lectura. Una lectura que llega tarde (más vieja que
+    # esta) se archiva en la traza pero NO reemplaza la posición actual.
+    timestamp_unix = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -50,6 +53,10 @@ class CheckPoint(Base):
     name = Column(String, nullable=False)
     timestamp = Column(String, nullable=False)   # DateTime, no String
     upload = Column(Boolean, nullable=False, default=False)
+    # Motivo por el que device-api nunca aceptará la marcación (despacho
+    # inexistente o de otro bus, hora inválida). Con valor, sale de la cola sin
+    # marcarse como subida en vez de reintentarse para siempre.
+    upload_error = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -105,4 +112,8 @@ class Passenger(Base):
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     upload = Column(Boolean, nullable=False, default=False)
+    # Motivo por el que el evento no se subirá nunca (device-api lo rechazó con
+    # 400 o el registro local es inutilizable). Con valor, sale de la cola sin
+    # marcarse como subido: sin esto se reenviaba en cada ciclo indefinidamente.
+    upload_error = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

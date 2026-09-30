@@ -21,7 +21,11 @@ Base = declarative_base()
 # es todo lo que hace falta aquí. Cada entrada es idempotente: si la columna ya
 # está, no se toca nada.
 ADDED_COLUMNS = {
-    "passenger": [("event_id", "VARCHAR(128)")],
+    "passenger": [
+        ("event_id", "VARCHAR(128)"),
+        # Cola de subida: motivo de rechazo definitivo (ver models.Passenger).
+        ("upload_error", "VARCHAR"),
+    ],
     # Revisión del despacho: se incrementa en cada escritura. Es el número con
     # el que simtra-bus-monitor sabe que la pantalla recargó el itinerario y
     # debe adoptarlo, y el que impide que una carga antigua del monitor pise
@@ -34,6 +38,10 @@ ADDED_COLUMNS = {
         ("timestamp_unix", "INTEGER"),
         ("upload_error", "VARCHAR"),
     ],
+    # Orden de la posición actual (ver models.GpsCurrent).
+    "gps_current": [("timestamp_unix", "INTEGER")],
+    # Cola de subida de marcaciones: motivo de rechazo definitivo.
+    "checkpoint": [("upload_error", "VARCHAR")],
 }
 
 

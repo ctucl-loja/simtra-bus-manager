@@ -1,6 +1,21 @@
-# SIMTRA Bus Manager
+# SIMTRA Bus Manager 1.5.2 LTS
 
 Microservicio de gestión de flotas de buses corriendo en Raspberry Pi. Compuesto por una API REST (FastAPI), un monitor de puntos de control y un loader de datos hacia el backend principal.
+
+---
+
+## Versión
+
+Esta entrega es la **1.5.2 LTS**. La etiqueta LTS identifica la entrega; este
+documento no fija fechas ni plazos de soporte.
+
+| Dónde | Fuente de verdad | Cómo se consulta |
+|---|---|---|
+| `simtra-bus-manager` | archivo `VERSION` (`1.5.2 LTS`) | `GET /api/version` → `{"version": "1.5.2", "label": "LTS"}`; también en `/docs` |
+| `bus-display` | `package.json` (`version` + `releaseLabel`) | pie de la vista **Info** («Acerca de este sistema»): `SIMTRA Bus Display v1.5.2 LTS` |
+
+Son dos repositorios que se despliegan por separado, así que cada uno tiene su
+única fuente. En una entrega nueva se cambian **ambos** archivos.
 
 ---
 
@@ -64,10 +79,36 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 ## Prueba rápida de la API
 
 ```bash
-curl http://192.168.1.14:8000/api/gps/last_position
+curl http://<IP_DE_LA_RPI>:8000/api/version
+curl http://<IP_DE_LA_RPI>:8000/api/gps/last_position
 ```
 
-Documentación interactiva disponible en: `http://192.168.1.14:8000/docs`
+Documentación interactiva disponible en: `http://<IP_DE_LA_RPI>:8000/docs`
+
+---
+
+## Configuración (`.env`)
+
+Un solo `.env` en la raíz del proyecto sirve a los tres servicios
+(`python-dotenv` lo busca hacia arriba desde `services/`). Plantilla:
+`cp .env.example .env`.
+
+| Variable | Obligatoria | Por defecto | Uso |
+|---|---|---|---|
+| `FAST_API_BUS_REGISTER` | **Sí** (entero > 0) | — | Registro del bus. Debe ser el asignado a este equipo en Buslytics (si no, device-api responde 403) |
+| `FAST_API_BACKEND_URL` | **Sí** | — | URL base del backend remoto **sin** `/api` ni barra final. Desarrollo: `http://localhost:4000` |
+| `FAST_API_DEVICE_API_KEY` | **Sí** | — | Clave del equipo (`X-API-Key`). Vacía = no se descarga ni se sube nada |
+| `FAST_API_LOCAL_BACKEND` | No | `http://127.0.0.1:8000` | Dónde monitor y loader encuentran la API local |
+| `FAST_API_CORS_ORIGINS` | No | `*` | Orígenes permitidos para `bus-display`, separados por comas |
+| `FAST_API_POLL_INTERVAL_SECONDS` | No | `2` | Cada cuánto el monitor lee la posición GPS |
+| `FAST_API_WATCHER_INTERVAL_SECONDS` | No | `10` | Cada cuánto el watcher reevalúa el recorrido vigente |
+| `SYSTEM_SHUTDOWN_COMMAND` / `SYSTEM_REBOOT_COMMAND` | No | ver [Energía](#energia-del-dispositivo-apagado-y-reinicio) | Comandos de apagado y reinicio |
+
+Los horarios del despacho son hora de Ecuador y **el monitor usa
+`America/Guayaquil` explícitamente** (no la zona del sistema) para decidir qué
+recorrido está vigente. Aun así conviene la RPi en esa zona
+(`sudo timedatectl set-timezone America/Guayaquil`): los logs y la fecha de
+algunos registros usan la hora del sistema.
 
 ---
 
@@ -137,10 +178,13 @@ datos sensibles del propietario. No se ha modificado el backend.
 
 `POST /api/gps` recibe cada lectura del receptor. Una lectura **válida**:
 
-1. **Siempre** actualiza la posición actual (`gps_current`, una sola fila), que
-   es lo que sirve `GET /api/gps/last_position` al monitor de geocercas, a las
-   pantallas y a `POST /api/passenger`. Así un bus detenido en una parada no
-   queda "congelado" en el último punto en movimiento.
+1. Actualiza la posición actual (`gps_current`, una sola fila), que es lo que
+   sirve `GET /api/gps/last_position` al monitor de geocercas, a las pantallas y
+   a `POST /api/passenger`. Así un bus detenido en una parada no queda
+   "congelado" en el último punto en movimiento. **Excepción:** una lectura más
+   vieja que la posición actual (llegó tarde o fuera de orden) se archiva en la
+   traza pero no reemplaza la posición: el bus no "retrocede" y el monitor no
+   lee una salida y una entrada falsas.
 2. **Siempre** se guarda en la **traza** (`gps`, `upload = false`, pendiente
    de subir), aunque la velocidad sea 0 o la posición se repita. No hay filtro
    de distancia ni de velocidad.
@@ -198,7 +242,10 @@ gps (upload=0) → GET /api/gps/pending?limit=100 (orden de inserción)
 
 Al arrancar, `database.ensure_schema()` agrega `gps.upload`,
 `gps.timestamp_unix`, `gps.upload_error`, la tabla `gps_current` y el índice
-`ix_gps_pending`, sin recrear ni borrar nada. Las filas de `gps` **anteriores**
+`ix_gps_pending`, sin recrear ni borrar nada. En 1.5.2 agrega además
+`gps_current.timestamp_unix`, `passenger.upload_error` y
+`checkpoint.upload_error` (las filas existentes quedan con `NULL`, es decir,
+siguen en la cola). Las filas de `gps` **anteriores**
 a la migración se conservan pero **no se encolan** (`upload = 1`): son traza sin
 filtrar y con zona horaria incierta. Si se decide subirlas igualmente:
 
@@ -213,6 +260,162 @@ de 30 min de la hora del servidor, prueba a reinterpretarlo como hora local de
 Ecuador (+5 h). Un punto correcto en UTC que se sube con **≈ 5 h de retraso**
 (cola acumulada sin red) puede quedar desplazado +5 h en el backend. No tiene
 arreglo del lado del equipo; solo afecta a colas de varias horas.
+
+---
+
+## Cola local de pasajeros
+
+`POST /api/passenger` (lo llama el contador de pasajeros) recibe
+`{event_id?, timestamp?, direction, door}`; **la ubicación la pone siempre este
+servicio** con su propio GPS: la posición actual para un evento reciente, o el
+punto de la traza más cercano al instante del cruce para uno atrasado (más de
+180 s). Sin GPS se guarda con `(0, 0)` y un aviso en el log.
+
+- `event_id` hace la llamada **idempotente**: el mismo evento no se duplica; el
+  mismo id con datos distintos responde `409`.
+- `timestamp` sin zona se interpreta como hora de `America/Guayaquil`.
+
+### Subida
+
+```
+passenger (upload=0, sin upload_error) → GET /api/passenger/pending
+  → POST /api/device-api/passenger {timestamp ISO con desfase, latitude,
+    longitude, register, direction?, door?}
+  → 201 → PATCH /api/passenger/{id}
+```
+
+- `direction` y `door` se envían en mayúsculas y deben ser los enums del
+  backend: `ENTRY`/`EXIT` y `FRONT`/`MIDDLE`/`END`. Un valor fuera de ellos, un
+  registro sin coordenadas o sin fecha, o un `400` del backend →
+  `POST /api/passenger/{id}/reject`: sale de la cola con su motivo en
+  `upload_error`, sin marcarse como subido. Antes se reenviaba en cada ciclo
+  indefinidamente.
+- `401`/`403`, `404` (el registro no existe en el backend), red o `5xx` → queda
+  pendiente y se corta el ciclo.
+- El backend **no deduplica pasajeros**: si confirmó pero falló el marcado
+  local, el loader reintenta solo el marcado. Si el proceso se reinicia entre
+  medias, el evento se reenviará y quedará duplicado en el backend.
+
+Revisar lo apartado:
+`sqlite3 app.db "SELECT id, direction, door, upload_error FROM passenger WHERE upload_error IS NOT NULL"`.
+Para reencolar uno: `UPDATE passenger SET upload_error = NULL WHERE id = …`.
+
+---
+
+## Cola local de marcaciones (checkpoints)
+
+`bus_monitor` guarda cada paso registrado con `POST /api/checkpoint`
+`{checkpoint_id, name, timestamp: "HH:MM:SS"}`. Es idempotente por
+`checkpoint_id`: repetir la llamada devuelve la fila existente.
+
+```
+checkpoint (upload=0, sin upload_error) → GET /api/checkpoint/pending
+  → PATCH /api/device-api/dispatch/:register {id, time_reported}
+  → 200 (o 409) → PATCH /api/checkpoint/{id}
+```
+
+| Respuesta de device-api | Qué hace el loader |
+|---|---|
+| `200` | Subido. También cuando se reenvía la misma hora (reintento) |
+| `409` | El despacho ya tiene **otra** hora (p. ej. corregida en el panel): se conserva la remota y se da por sincronizado |
+| `400`, o `404` con `Dispatch with ID … does not exists` | Despacho inexistente, eliminado o de otro bus: `POST /api/checkpoint/{id}/reject`, sale de la cola con su motivo |
+| `404` sin ese mensaje | La ruta no existe (backend desactualizado): queda pendiente y se corta el ciclo |
+| `401`/`403`, red, `5xx` | Queda pendiente y se corta el ciclo; se reintenta con la misma hora |
+
+Un registro local con `time_reported` que no sea `HH:MM:SS` o sin id numérico
+sale de la cola sin enviarse. Los rechazos quedan en SQLite:
+`SELECT * FROM checkpoint WHERE upload_error IS NOT NULL`.
+
+---
+
+## Pasos por puntos de control (`bus_monitor`)
+
+Un paso recorre cinco etapas, y cada una deja su propia huella en el log
+(`bus_monitor.log` / `journalctl -u simtra-bus-monitor`), para poder saber
+dónde se quedó uno que "no aparece":
+
+| Etapa | Dónde | Log |
+|---|---|---|
+| 1. El punto existe en el despacho | `GET /api/device-api/dispatch/...` → geocercas (`point.latitude/longitude/radius`) | `[GEOFENCE] Punto inutilizable …` si falta algo |
+| 2. El GPS pasó por el punto | `GeofenceMonitor.process` | ` ENTRADA`, `🚪 SALIDA`, `↔️  CRUCE` |
+| 3. Se atribuye a un recorrido y se guarda localmente | `resolve_and_report_checkpoint` → `POST /api/checkpoint` | `[TRIP] Checkpoint … marcado`; si no es elegible: `[PASO] … sin checkpoint elegible` y el motivo (`[TRANSITION]`, `[GEOFENCE] … ignorado`); si falla: `[TRIP] Paso DETECTADO pero NO guardado` |
+| 4. Se envía al backend | `data_loader` → `PATCH /api/device-api/dispatch/:register` | `Sending checkpoint …`, `[API] …` |
+| 5. El backend lo acepta | respuesta `200`/`409` | marcado local; un rechazo sale de la cola con `upload_error` |
+
+Que el punto se vea en el mapa (etapa 1) no implica ninguna de las siguientes.
+
+### Detección geográfica
+
+El monitor lee `GET /api/gps/last_position` cada
+`FAST_API_POLL_INTERVAL_SECONDS` y observa las geocercas de los recorridos
+anterior, actual y siguiente. Un paso se detecta de tres formas:
+
+- **Entrada**: una muestra dentro del radio tras estar fuera. Hora = la de esa
+  muestra. Si el monitor arranca con el bus ya dentro, cuenta como entrada.
+- **Cruce entre muestras**: dos muestras seguidas fuera del radio, pero el tramo
+  recto entre ellas lo atraviesa (a 40 km/h el bus recorre ~11 m/s: con muestras
+  cada 2–3 s puede cruzar una geocerca de 50 m sin que ninguna caiga dentro).
+  Hora interpolada en el punto más cercano del tramo. Solo con muestras
+  separadas ≤ 20 s (`MAX_SAMPLE_GAP_SECONDS`) y ≤ 500 m
+  (`MAX_INTERPOLATION_DISTANCE_M`): más allá es un salto o un hueco sin GPS.
+- **Salida del punto de inicio**: ver abajo.
+
+Permanecer dentro no genera nuevos pasos. Una lectura GPS más vieja que la
+anterior se ignora (`[GPS] Lectura fuera de orden`), y una repetida (el
+receptor no envió nada nuevo) no cuenta como muestra nueva. Una posición
+recibida por la API hace más de 30 s (`GPS_STALE_SECONDS`) no sirve como
+evidencia de salida ni de cruce.
+
+### Horarios: a qué recorrido pertenece un paso
+
+El watcher resuelve cada `FAST_API_WATCHER_INTERVAL_SECONDS` el estado del día
+**solo con los horarios** (`start_schedule`/`end_schedule`, bordes inclusivos):
+antes del primero, un recorrido activo, entre dos, o después del último. Con
+ese estado, un paso se atribuye así (el recorrido en curso o que se está
+terminando siempre tiene prioridad sobre el siguiente):
+
+| Estado | Checkpoints elegibles |
+|---|---|
+| Recorrido activo | cualquiera sin reportar del recorrido activo; si no hay, **adelanto** del siguiente |
+| Entre dos recorridos | **retraso** del anterior; si no, **adelanto** del siguiente |
+| Después del último | **retraso** del último, hasta 10 min después de su fin (`CLOSING_GRACE_MINUTES`) |
+| Antes del primero | **adelanto** del primero |
+
+- **Retraso**: cualquier checkpoint del recorrido que ya terminó (no solo el
+  último), si la secuencia lo respalda: como mucho 2 anteriores sin reportar
+  (`MAX_SKIPPED_CHECKPOINTS`) y un `order` mayor que el último reportado de ese
+  recorrido (un punto que el bus ya dejó atrás no se marca al pasar en sentido
+  contrario).
+- **Adelanto**: desde 5 min antes del `start_schedule`
+  (`EARLY_START_TOLERANCE_MINUTES`, la misma ventana de ±5 min con la que
+  buslytics-backend asigna reportes a un step) y solo para los primeros
+  checkpoints del recorrido (misma regla de secuencia).
+- **Salida del punto de inicio**: si el bus ya estaba dentro del primer punto de
+  un recorrido cuando ese recorrido todavía no era elegible (esperando en la
+  terminal, o al terminar la vuelta anterior en el mismo punto), el inicio se
+  registra **al salir**, con la hora de la primera muestra fuera. Un inicio
+  alcanzado dentro de la ventana de adelanto también espera a la salida: el bus
+  puede estar esperando en la terminal.
+- Un paso fuera de todas estas ventanas **no se atribuye** a ningún recorrido
+  (no se inventa), y queda el motivo en el log.
+
+La puntualidad (`EARLY`/`ON_TIME`/`LATE`) se calcula después, sobre el paso ya
+registrado, y nunca decide si el paso existe.
+
+### Recuperación
+
+| Situación | Qué pasa |
+|---|---|
+| La API local no guarda el paso | Reintento en cada lectura GPS con la hora original, 15 min |
+| El backend remoto no responde | El paso queda en la cola local; el loader lo reenvía con la misma hora |
+| El monitor se reinicia | Se consideran ya registrados los pasos que trae el backend **y** los del despacho local y la cola pendiente: no se repiten |
+| Recarga manual del itinerario | Se adopta sin olvidar los pasos del día (ver [Coordinación](#coordinacion-con-simtra-bus-monitor)) |
+| Cambio de día | El watcher descarta el estado anterior y descarga los despachos del día nuevo |
+
+Los recorridos que cruzan medianoche **no están soportados**: se descartan con
+un aviso en el log.
+
+---
 
 ## Rutas del proyecto
 
@@ -244,7 +447,7 @@ de la maquina donde corre**.
 
 | Archivo | Que ejercita | Dependencias |
 |---|---|---|
-| Todos menos los dos siguientes | Funciones puras y servicios, con stubs (cliente device-api, loader, monitor) | Ninguna |
+| Todos menos los dos siguientes | Funciones puras y servicios, con stubs (cliente device-api, loader, monitor). `tests/test_checkpoint_passes.py` recorre escenarios de pasos con reloj y GPS controlados: en horario, adelanto, espera en terminal compartida, retraso, cruce entre muestras, lectura fuera de orden, fallo de persistencia, reinicio | Ninguna |
 | `tests/test_api_endpoints.py` | **Endpoints reales**: FastAPI + Pydantic + SQLAlchemy sobre SQLite temporal (cola GPS, guardado de todas las lecturas, concurrencia, migracion) | `fastapi`, `sqlalchemy`, `httpx` |
 | `tests/test_gps_pipeline.py` | **Extremo a extremo**: `POST /api/gps` → `data_loader.sync_once()` → `ApiService` real con device-api simulado → marcado en SQLite | `fastapi`, `sqlalchemy`, `httpx` |
 
@@ -297,12 +500,16 @@ checkpoint tiene tres estados distintos:
 |---|---|---|
 | Reservado | un hilo se lo adjudicó y está persistiendo | no |
 | Confirmado | `report_checkpoint` respondió OK | no, cerrado por el día |
-| Liberado | la persistencia falló; la reserva se deshizo | sí, en la próxima entrada |
+| Liberado | la persistencia falló; la reserva se deshizo | lo reintenta el monitor (ver abajo) |
 
 `report_checkpoint` es la escritura **indispensable**: alimenta la cola que
 `data_loader` sube al backend. Si falla, se libera la reserva y no hay evento ni
-audio — un fallo transitorio no puede costar la marcación del día ni anunciar al
-conductor una llegada que no se guardó.
+audio — un fallo transitorio no puede anunciar al conductor una llegada que no
+se guardó. El paso **no se pierde**: el monitor lo reintenta en cada lectura
+GPS con la misma decisión y la **hora original**, aunque el bus ya haya salido
+de la geocerca, durante 15 min (`PERSIST_RETRY_MAX_SECONDS`). Un reintento
+exitoso emite el evento pero no reproduce audio (el bus ya no está ahí). Si se
+agota, queda un `ERROR` `[TRIP] Paso PERDIDO` en el log.
 
 `report_dispatch_checkpoint` es **secundaria**: actualiza el despacho cacheado
 que ve la pantalla. Si falla, la marcación ya está a salvo, así que se registra
@@ -352,7 +559,14 @@ difference_seconds < 0   → llegó antes
 
 `ON_TIME_TOLERANCE_SECONDS` (por defecto **30 s**, en `bus_monitor.py`) es
 **solo una clasificación informativa para el conductor**: no interviene en la
-selección de steps ni en la autorización de marcajes. Los estados viajan con
+selección de steps ni en la autorización de marcajes. Un paso adelantado o
+atrasado se registra igual (si es elegible, ver
+[Pasos por puntos de control](#pasos-por-puntos-de-control-bus_monitor)) y
+solo se clasifica como `EARLY` o `LATE`.
+
+`payload.reason` indica cómo se atribuyó el paso (auditoría, la pantalla no lo
+usa): `progreso normal`, `paso con retraso`, `cierre tardío`, `adelanto`, y los
+sufijos `salida del inicio (…)` o `…, cruce entre muestras GPS`. Los estados viajan con
 nombres técnicos (`EARLY` / `ON_TIME` / `LATE`); traducirlos es tarea de la UI.
 
 ### Consulta incremental — `after_id`
@@ -1024,9 +1238,11 @@ rm -f audio/checkpoint_*.mp3 audio/checkpoint_*.json
 Para copiar las bases de datos desde la RPi a la laptop:
 
 ```bash
-scp admin@192.168.1.14:/home/admin/simtra-bus-manager/app.db .
-scp admin@192.168.1.14:/home/admin/simtra-bus-manager/data_loader.db .
+scp admin@<IP_DE_LA_RPI>:/home/admin/simtra-bus-manager/app.db .
 ```
+
+`app.db` es la única base de datos (la API local). El loader no tiene base
+propia: lee y marca sus colas a través de la API.
 
 ---
 
@@ -1166,3 +1382,20 @@ Pasos en cada Raspberry (no se ejecutan en desarrollo):
    - `curl http://127.0.0.1:8000/api/gps/pending` baja a `[]` con red;
    - la recarga del itinerario desde la pantalla responde `updated` o `empty`.
 
+---
+
+## Actualización a 1.5.2 LTS
+
+1. Copia de seguridad de `app.db`.
+2. `git pull` en `simtra-bus-manager` y en `bus-display` (y recompilar la
+   pantalla).
+3. Reiniciar primero la API (aplica la migración: `gps_current.timestamp_unix`,
+   `passenger.upload_error`, `checkpoint.upload_error`) y después monitor y
+   loader:
+
+   ```bash
+   sudo systemctl restart simtra-bus-manager
+   sudo systemctl restart simtra-bus-monitor simtra-bus-loader
+   ```
+4. Verificar `curl http://127.0.0.1:8000/api/version` → `{"version":"1.5.2","label":"LTS"}`
+   y el pie de la vista Info de la pantalla.

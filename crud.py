@@ -66,12 +66,22 @@ def create_gps_data(db: Session, data: GPSDataCreate) -> Gps:
             if current is None:
                 current = GpsCurrent(id=1)
                 db.add(current)
-            current.timestamp = data.timestamp
-            current.latitude = data.latitude
-            current.longitude = data.longitude
-            current.speed = data.speed
-            current.trace_id = gps.id
-            current.created_at = datetime.now(timezone.utc)
+
+            # Una lectura más vieja que la posición actual (llegó tarde o
+            # fuera de orden) queda en la traza, pero no hace "retroceder" al
+            # bus: el monitor leería una salida y una entrada falsas.
+            if current.timestamp_unix is not None and gps.timestamp_unix < current.timestamp_unix:
+                log.info(
+                    "[GPS] Lectura fuera de orden (%s < posición actual): se archiva "
+                    "sin reemplazar la posición actual", data.timestamp.isoformat())
+            else:
+                current.timestamp = data.timestamp
+                current.timestamp_unix = gps.timestamp_unix
+                current.latitude = data.latitude
+                current.longitude = data.longitude
+                current.speed = data.speed
+                current.trace_id = gps.id
+                current.created_at = datetime.now(timezone.utc)
 
             db.commit()
         except Exception:
@@ -166,9 +176,25 @@ def create_checkpoint(db: Session, checkpoint_id: int, name: str, timestamp):
 
 def get_pending_checkpoints(db:Session):
     checkpoints = db.query(CheckPoint).filter(
-        CheckPoint.upload == False
-    ).all()
+        CheckPoint.upload == False,  # noqa: E712
+        CheckPoint.upload_error.is_(None),
+    ).order_by(CheckPoint.id.asc()).all()
     return checkpoints
+
+
+def reject_pending_checkpoint(db: Session, id: int, reason: str):
+    """
+    Saca de la cola una marcación que device-api no aceptará nunca, SIN
+    marcarla como subida. Queda en la base con su motivo (mismo criterio que
+    GPS y pasajeros).
+    """
+    checkpoint = db.query(CheckPoint).filter(CheckPoint.id == id).first()
+    if not checkpoint:
+        return None
+    checkpoint.upload_error = reason[:200]
+    db.commit()
+    db.refresh(checkpoint)
+    return checkpoint
 
 def upload_pending_checkpoints(db: Session, id: int):
     checkpoint = db.query(CheckPoint).filter(CheckPoint.id == id).first()
@@ -262,9 +288,24 @@ def create_passenger(db: Session, data: PassengerCreate) -> Passenger:
 
 def get_pending_passengers(db:Session):
     passengers = db.query(Passenger).filter(
-        Passenger.upload == False
-    ).all()
+        Passenger.upload == False,  # noqa: E712
+        Passenger.upload_error.is_(None),
+    ).order_by(Passenger.id.asc()).all()
     return passengers
+
+
+def reject_pending_passenger(db: Session, id: int, reason: str):
+    """
+    Saca de la cola un evento que no se subirá nunca, SIN marcarlo como subido.
+    Queda en la base con su motivo para poder revisarlo (mismo criterio que GPS).
+    """
+    passenger = db.query(Passenger).filter(Passenger.id == id).first()
+    if not passenger:
+        return None
+    passenger.upload_error = reason[:200]
+    db.commit()
+    db.refresh(passenger)
+    return passenger
 
 def get_passengers_today(db: Session):
     """

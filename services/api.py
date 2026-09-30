@@ -51,6 +51,11 @@ API_KEY_HEADER = "X-API-Key"
 # backend desactualizado) NO es un día vacío.
 NO_DISPATCH_MESSAGE_PREFIX = "No dispatch found"
 
+# Mensaje con el que DispatchService.updateTimeReported responde 404 cuando el
+# despacho no existe, fue eliminado o es de otro bus: la marcación no se
+# aceptará nunca. Un 404 sin este mensaje (ruta inexistente) no lo es.
+DISPATCH_NOT_FOUND_MESSAGE_PREFIX = "Dispatch with ID"
+
 
 # ─────────────────────────────────────────────
 # RESULTADO EXPLÍCITO DE UNA LECTURA DE DESPACHOS
@@ -105,6 +110,10 @@ SEND_RETRY        = "retry"          # red, timeout, 429, 5xx: reintentar despu�
 class SendResult:
     status: str
     http_status: Optional[int] = None
+    # `message` del cuerpo de error de buslytics-backend (AllExceptionsFilter),
+    # recortado. Sirve para distinguir, p. ej., un 404 de despacho inexistente
+    # de un 404 de ruta inexistente. Nunca contiene la API key.
+    detail: Optional[str] = None
 
     def __bool__(self) -> bool:
         return self.status == SEND_OK
@@ -195,21 +204,36 @@ class ApiService:
         code = response.status_code
         if code in ok_statuses:
             return SendResult(SEND_OK, code)
+
+        detail = self._error_detail(response)
+        suffix = f": {detail}" if detail else ""
         if code in (401, 403):
-            log.error(f"[API] {description}: API key rechazada o bus no asignado (HTTP {code})")
-            return SendResult(SEND_AUTH_ERROR, code)
+            log.error(f"[API] {description}: API key rechazada o bus no asignado (HTTP {code}){suffix}")
+            return SendResult(SEND_AUTH_ERROR, code, detail)
         if code == 409:
-            log.warning(f"[API] {description}: el backend ya tiene otro valor (HTTP 409)")
-            return SendResult(SEND_CONFLICT, code)
+            log.warning(f"[API] {description}: el backend ya tiene otro valor (HTTP 409){suffix}")
+            return SendResult(SEND_CONFLICT, code, detail)
         if code in (400, 422):
-            log.error(f"[API] {description}: dato rechazado por el backend (HTTP {code})")
-            return SendResult(SEND_REJECTED, code)
+            log.error(f"[API] {description}: dato rechazado por el backend (HTTP {code}){suffix}")
+            return SendResult(SEND_REJECTED, code, detail)
         if code == 404:
-            log.error(f"[API] {description}: recurso no encontrado (HTTP 404)")
-            return SendResult(SEND_NOT_FOUND, code)
+            log.error(f"[API] {description}: recurso no encontrado (HTTP 404){suffix}")
+            return SendResult(SEND_NOT_FOUND, code, detail)
 
         log.error(f"[API] {description}: HTTP {code} — se reintentará")
-        return SendResult(SEND_RETRY, code)
+        return SendResult(SEND_RETRY, code, detail)
+
+    @staticmethod
+    def _error_detail(response) -> Optional[str]:
+        """`message` del cuerpo de error (texto o lista), recortado; o None."""
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        message = body.get("message") if isinstance(body, dict) else None
+        if isinstance(message, list):
+            message = "; ".join(str(m) for m in message)
+        return message[:200] if isinstance(message, str) and message else None
 
     # ─────────────────────────────────────────
     # LECTURAS

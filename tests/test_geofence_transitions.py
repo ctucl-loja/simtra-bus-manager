@@ -229,16 +229,24 @@ class GeofenceTransitionTest(unittest.TestCase):
         self.assertNotIn(3701, bm.CONFIRMED_CHECKPOINTS)
         self.assertNotIn(3701, bm.IN_FLIGHT_CHECKPOINTS)
 
-    def test_reintento_en_la_siguiente_entrada_tras_fallo_de_persistencia(self):
+    def test_reintento_tras_fallo_de_persistencia_conserva_la_hora_de_ingreso(self):
+        """
+        Antes el reintento solo ocurría si el bus volvía a entrar, y con la hora
+        de esa nueva entrada. Ahora el monitor reintenta en cada lectura la
+        MISMA decisión con la hora original, aunque el bus ya haya salido.
+        """
         self.checkpoint_ok = False
         self.monitor.process(INSIDE)
-        self.monitor.process(OUTSIDE)
+        self.monitor.process(OUTSIDE)            # reintento: sigue fallando
 
         self.checkpoint_ok = True
-        self.monitor.process(INSIDE)
+        self.monitor.process(INSIDE)             # reintento: se guarda
 
-        self.assertEqual(len(self.checkpoint_calls), 2)
+        self.assertEqual(len(self.checkpoint_calls), 3)
+        self.assertEqual({call[2] for call in self.checkpoint_calls},
+                         {self.checkpoint_calls[0][2]})   # siempre la hora de ingreso
         self.assertEqual(len(self.events), 1)
+        self.assertEqual(self.announced, [])     # el bus ya no está ahí: sin anuncio
         self.assertIn(3701, bm.CONFIRMED_CHECKPOINTS)
 
     # ── arranque dentro de la geocerca ───────────────────────────────────────

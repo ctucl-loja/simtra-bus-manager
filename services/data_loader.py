@@ -12,9 +12,12 @@ Reglas:
     checkpoints: el backend ya tiene otra hora y no la sobrescribe).
   · Timeout, red caída, 5xx, API key ausente o rechazada → el elemento queda
     pendiente y el ciclo se corta: los siguientes fallarían igual.
-  · Un punto GPS que el backend rechaza con 400 (o que localmente es
-    inutilizable) sale de la cola con su motivo, sin marcarse como subido, para
-    no bloquear a los siguientes.
+  · Un punto GPS, un pasajero o una marcación que el backend rechaza con 400
+    (o que localmente es inutilizable) sale de la cola con su motivo, sin
+    marcarse como subido, para no bloquear a los siguientes ni reenviarse para
+    siempre. En marcaciones, también el 404 "Dispatch with ID …" (despacho
+    inexistente o de otro bus); un 404 sin ese mensaje es la ruta ausente y
+    corta el ciclo sin descartar nada.
   · Si el backend confirmó pero falló el PATCH local, el id se recuerda y en el
     ciclo siguiente se reintenta SOLO el marcado local, sin reenviar.
   · Orden: checkpoints, pasajeros y por último GPS, en tandas acotadas por
@@ -26,6 +29,7 @@ Importar este módulo no arranca el bucle (ver `run_forever`).
 import logging
 import math
 import os
+import re
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -35,6 +39,7 @@ from dotenv import load_dotenv
 
 from api import (
     ApiService, SEND_OK, SEND_CONFLICT, SEND_REJECTED, SEND_NOT_FOUND,
+    DISPATCH_NOT_FOUND_MESSAGE_PREFIX,
 )
 
 
@@ -53,6 +58,17 @@ LOCAL_TIMEOUT = 5
 # presupuesto corta antes y el resto queda para el ciclo siguiente.
 GPS_BATCH_SIZE = 100
 GPS_CYCLE_BUDGET_SECONDS = 30
+
+# `time_reported` que acepta la columna `time` de dispatch en el backend, en la
+# forma en que la escribe bus_monitor ('HH:MM:SS').
+CHECKPOINT_TIME_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d:[0-5]\d")
+
+# Valores que acepta CreatePassengerDto (enums DoorDirection y Door de
+# buslytics-backend, src/database/entities/passenger.entity.ts).
+PASSENGER_ENUMS = {
+    "direction": {"ENTRY", "EXIT"},
+    "door": {"FRONT", "MIDDLE", "END"},
+}
 
 logger = logging.getLogger("data_loader")
 
@@ -128,9 +144,16 @@ def passenger_payload(p):
         # en SU zona horaria.
         "timestamp": timestamp.isoformat(),
     }
-    for name in ("direction", "door"):
-        if p.get(name) is not None:
-            payload[name] = p.get(name)
+    # CreatePassengerDto valida los enums con @IsEnum: un valor fuera de ellos
+    # es un 400 seguro, así que se detecta aquí sin gastar la petición.
+    for name, allowed in PASSENGER_ENUMS.items():
+        value = p.get(name)
+        if value is None:
+            continue
+        normalized = str(value).strip().upper()
+        if normalized not in allowed:
+            return None
+        payload[name] = normalized
     return payload
 
 
@@ -254,6 +277,20 @@ def reject_gps_local_register(id, reason):
     )
 
 
+def reject_checkpoint_local_register(id, reason):
+    return _patch_local(
+        f"/api/checkpoint/{id}/reject", f"checkpoint {id} (reject)",
+        json={"reason": reason}, method="POST",
+    )
+
+
+def reject_passenger_local_register(id, reason):
+    return _patch_local(
+        f"/api/passenger/{id}/reject", f"passenger {id} (reject)",
+        json={"reason": reason}, method="POST",
+    )
+
+
 def _mark(kind: str, row_id) -> bool:
     marker = {
         "gps": update_gps_local_register,
@@ -302,10 +339,16 @@ def sync_checkpoints():
         try:
             formatted_data = {'id': int(remote_id), 'time_reported': timestamp}
         except (TypeError, ValueError):
-            logger.error(f"Checkpoint {row_id} con checkpoint_id no numerico ({remote_id!r}), se omite")
+            formatted_data = None
+        if formatted_data is None or not (isinstance(timestamp, str)
+                                          and CHECKPOINT_TIME_PATTERN.fullmatch(timestamp)):
+            # Antes quedaba en la cola y se leía en cada ciclo para siempre.
+            logger.error(f"Checkpoint {row_id} inutilizable, sale de la cola: {c!r}")
+            if reject_checkpoint_local_register(row_id, "registro local inutilizable"):
+                done += 1
             continue
 
-        logger.info(f"Sending checkpoint {row_id}")
+        logger.info(f"Sending checkpoint {row_id} (despacho {remote_id} @ {timestamp})")
         result = simtra.update_dispatch(formatted_data, BUS_REGISTER)
 
         if result.status in (SEND_OK, SEND_CONFLICT):
@@ -319,10 +362,25 @@ def sync_checkpoints():
         elif result.stops_queue:
             logger.warning(f"Failed to send checkpoint {row_id} ({result.status}) — se corta el ciclo")
             return done, True
+        elif result.status == SEND_REJECTED or (
+                result.status == SEND_NOT_FOUND
+                and (result.detail or "").startswith(DISPATCH_NOT_FOUND_MESSAGE_PREFIX)):
+            # 400: dato inválido. 404 "Dispatch with ID …": el despacho no
+            # existe, se eliminó o es de otro bus. Nunca se aceptará: se aparta
+            # con su motivo en vez de reenviarlo en cada ciclo.
+            reason = f"rechazado por device-api (HTTP {result.http_status})"
+            logger.error(f"Checkpoint {row_id} (despacho {remote_id}) {reason}, sale de la cola")
+            if reject_checkpoint_local_register(row_id, reason):
+                done += 1
         else:
-            # 400/404: el despacho no existe o no es de este bus. No bloquea a
-            # los demás; queda pendiente para revisión.
-            logger.warning(f"Failed to send checkpoint {row_id} ({result.status})")
+            # 404 SIN el mensaje de despacho inexistente: la ruta no existe
+            # (backend desactualizado). Afecta a todas las marcaciones; quedan
+            # pendientes y se corta el ciclo.
+            logger.warning(
+                f"Failed to send checkpoint {row_id} ({result.status}, HTTP {result.http_status}) "
+                f"— queda pendiente y se corta el ciclo"
+            )
+            return done, True
     return done, False
 
 
@@ -330,12 +388,18 @@ def sync_passengers():
     done = 0
     for p in get_pending_passengers():
         passenger_id = p.get('id') if isinstance(p, dict) else None
-        formatted_data = passenger_payload(p)
-
-        if passenger_id is None or formatted_data is None:
-            logger.error(f"Passenger local record incompleto, se omite: {p!r}")
+        if passenger_id is None:
+            logger.error(f"Passenger local record sin id, se omite: {p!r}")
             continue
         if ("passenger", passenger_id) in _sent_not_marked:
+            continue
+
+        formatted_data = passenger_payload(p)
+        if formatted_data is None:
+            # Sin sacarlo de la cola se reintentaría en cada ciclo para siempre.
+            logger.error(f"Passenger {passenger_id} inutilizable, sale de la cola: {p!r}")
+            if reject_passenger_local_register(passenger_id, "registro local inutilizable"):
+                done += 1
             continue
 
         logger.info(f"Sending passenger {passenger_id}")
@@ -344,6 +408,13 @@ def sync_passengers():
         if result.ok:
             _mark("passenger", passenger_id)
             done += 1
+        elif result.status == SEND_REJECTED:
+            # 400/422: el backend nunca lo aceptará tal cual. Reenviarlo solo
+            # repetiría el rechazo en cada ciclo; se aparta con su motivo.
+            logger.error(f"Passenger {passenger_id} rechazado por el backend (HTTP {result.http_status}), sale de la cola")
+            if reject_passenger_local_register(
+                    passenger_id, f"rechazado por device-api (HTTP {result.http_status})"):
+                done += 1
         elif result.stops_queue or result.status == SEND_NOT_FOUND:
             # 404 aquí = el registro del bus no existe en el backend: afecta a
             # todos los envíos, no solo a este.

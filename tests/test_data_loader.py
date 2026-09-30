@@ -36,8 +36,10 @@ class FakeSimtra:
     def _next(self, kind):
         value = self.results[kind]
         status = value.pop(0) if isinstance(value, list) else value
+        # (status, detail) permite simular el `message` del cuerpo de error.
+        status, detail = status if isinstance(status, tuple) else (status, None)
         return SendResult(status, {SEND_REJECTED: 400, SEND_CONFLICT: 409,
-                                   SEND_AUTH_ERROR: 401, SEND_NOT_FOUND: 404}.get(status))
+                                   SEND_AUTH_ERROR: 401, SEND_NOT_FOUND: 404}.get(status), detail)
 
     def post_gps(self, data, register):
         self.calls.append(("gps", data, register))
@@ -66,6 +68,8 @@ class LoaderTestCase(unittest.TestCase):
     def setUp(self):
         self.marked = []
         self.rejected = []
+        self.rejected_passengers = []
+        self.rejected_checkpoints = []
         self.mark_ok = True
         data_loader._sent_not_marked.clear()
         self.addCleanup(data_loader._sent_not_marked.clear)
@@ -87,8 +91,11 @@ class LoaderTestCase(unittest.TestCase):
 
         def pending(kind, rows):
             # Como la API local: lo ya marcado deja de estar pendiente.
+            # Y lo apartado con /reject tampoco.
             return lambda *a, **k: [r for r in rows
-                                    if (kind, r.get("id") if isinstance(r, dict) else None) not in self.marked]
+                                    if (kind, r.get("id") if isinstance(r, dict) else None) not in self.marked
+                                    and not (kind == "passenger"
+                                             and r.get("id") in [x[0] for x in self.rejected_passengers])]
 
         self.patch(
             BUS_REGISTER=1624,
@@ -100,7 +107,18 @@ class LoaderTestCase(unittest.TestCase):
             update_passenger_local_register=marker("passenger"),
             update_checkpoint_local_register=marker("checkpoint"),
             reject_gps_local_register=lambda row_id, reason: self.rejected.append((row_id, reason)) or True,
+            reject_checkpoint_local_register=(
+                lambda row_id, reason: self.rejected_checkpoints.append((row_id, reason)) or True),
+            reject_passenger_local_register=(
+                lambda row_id, reason: self.rejected_passengers.append((row_id, reason)) or True),
         )
+
+
+def passenger_row(row_id, **extra):
+    row = {"id": row_id, "timestamp": "2026-08-25T07:00:00", "latitude": -4, "longitude": -79,
+           "direction": "ENTRY", "door": "FRONT"}
+    row.update(extra)
+    return row
 
 
 # ─────────────────────────────────────────────
@@ -195,6 +213,15 @@ class PassengerPayloadTest(unittest.TestCase):
         self.assertNotIn("direction", payload)
         self.assertNotIn("door", payload)
 
+    def test_enums_se_normalizan_a_mayusculas(self):
+        payload = data_loader.passenger_payload(passenger_row(1, direction=" exit ", door="middle"))
+        self.assertEqual((payload["direction"], payload["door"]), ("EXIT", "MIDDLE"))
+
+    def test_enum_fuera_del_dto_remoto_es_inutilizable(self):
+        for field, value in (("direction", "IN"), ("door", "BACK"), ("direction", "0")):
+            with self.subTest(field=field, value=value):
+                self.assertIsNone(data_loader.passenger_payload(passenger_row(1, **{field: value})))
+
 
 # ─────────────────────────────────────────────
 # CICLO
@@ -275,6 +302,40 @@ class SyncOnceTest(LoaderTestCase):
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(self.marked, [("gps", 2)])
 
+    def test_pasajero_rechazado_con_400_sale_de_la_cola_y_no_se_reenvia(self):
+        fake = FakeSimtra(passenger=[SEND_REJECTED, SEND_OK])
+        self.install(fake, passengers=[passenger_row(5), passenger_row(6)])
+
+        data_loader.sync_once()
+
+        self.assertEqual(self.rejected_passengers, [(5, "rechazado por device-api (HTTP 400)")])
+        self.assertEqual(self.marked, [("passenger", 6)])
+
+        # Ciclos siguientes: el rechazado ya no se envía (antes, en bucle infinito).
+        data_loader.sync_once()
+        data_loader.sync_once()
+        self.assertEqual(fake.kinds().count("passenger"), 2)
+
+    def test_pasajero_local_inutilizable_sale_de_la_cola_sin_enviarse(self):
+        fake = FakeSimtra()
+        self.install(fake, passengers=[passenger_row(5, door="BACK"), passenger_row(6)])
+
+        data_loader.sync_once()
+        data_loader.sync_once()
+
+        self.assertEqual(self.rejected_passengers, [(5, "registro local inutilizable")])
+        self.assertEqual(fake.kinds(), ["passenger"])
+        self.assertEqual(self.marked, [("passenger", 6)])
+
+    def test_pasajero_con_fallo_transitorio_sigue_pendiente(self):
+        fake = FakeSimtra(passenger=SEND_RETRY)
+        self.install(fake, passengers=[passenger_row(5)])
+
+        data_loader.sync_once()
+
+        self.assertEqual(self.rejected_passengers, [])
+        self.assertEqual(self.marked, [])
+
     def test_fallo_al_marcar_local_reintenta_solo_el_marcado(self):
         fake = FakeSimtra()
         rows = [gps_row(7)]
@@ -295,7 +356,8 @@ class SyncOnceTest(LoaderTestCase):
         self.assertEqual(data_loader._sent_not_marked, set())
 
     def test_checkpoint_con_register_y_409_se_da_por_sincronizado(self):
-        fake = FakeSimtra(dispatch=[SEND_OK, SEND_CONFLICT, SEND_NOT_FOUND])
+        missing = (SEND_NOT_FOUND, "Dispatch with ID 3703 does not exists")
+        fake = FakeSimtra(dispatch=[SEND_OK, SEND_CONFLICT, missing])
         self.install(fake, checkpoints=[
             {"id": 9, "checkpoint_id": 3701, "timestamp": "06:10:00"},
             {"id": 10, "checkpoint_id": 3702, "timestamp": "06:30:00"},
@@ -305,8 +367,62 @@ class SyncOnceTest(LoaderTestCase):
         data_loader.sync_once()
 
         self.assertEqual(fake.calls[0][1:], ({"id": 3701, "time_reported": "06:10:00"}, 1624))
-        # 404 de un despacho no bloquea al resto ni se marca.
+        # 404 de un despacho inexistente no bloquea al resto ni se marca: sale
+        # de la cola con su motivo (antes se reenviaba en cada ciclo).
         self.assertEqual(self.marked, [("checkpoint", 9), ("checkpoint", 10), ("gps", 1)])
+        self.assertEqual(self.rejected_checkpoints, [(11, "rechazado por device-api (HTTP 404)")])
+
+    def test_checkpoint_404_de_ruta_inexistente_queda_pendiente_y_corta(self):
+        """Un 404 sin el mensaje de despacho es el backend sin la ruta: no se descarta nada."""
+        fake = FakeSimtra(dispatch=(SEND_NOT_FOUND, "Cannot PATCH /api/device-api/dispatch/1624"))
+        self.install(fake, checkpoints=[
+            {"id": 9, "checkpoint_id": 3701, "timestamp": "06:10:00"},
+            {"id": 10, "checkpoint_id": 3702, "timestamp": "06:30:00"},
+        ], gps=[gps_row(1)])
+
+        data_loader.sync_once()
+
+        self.assertEqual(fake.kinds(), ["dispatch"])
+        self.assertEqual(self.marked, [])
+        self.assertEqual(self.rejected_checkpoints, [])
+
+    def test_checkpoint_rechazado_con_400_sale_de_la_cola(self):
+        fake = FakeSimtra(dispatch=[SEND_REJECTED, SEND_OK])
+        self.install(fake, checkpoints=[
+            {"id": 9, "checkpoint_id": 3701, "timestamp": "06:10:00"},
+            {"id": 10, "checkpoint_id": 3702, "timestamp": "06:30:00"},
+        ])
+
+        data_loader.sync_once()
+
+        self.assertEqual(self.rejected_checkpoints, [(9, "rechazado por device-api (HTTP 400)")])
+        self.assertEqual(self.marked, [("checkpoint", 10)])
+
+    def test_checkpoint_con_hora_invalida_sale_de_la_cola_sin_enviarse(self):
+        fake = FakeSimtra()
+        self.install(fake, checkpoints=[
+            {"id": 9, "checkpoint_id": 3701, "timestamp": "6:10"},
+            {"id": 10, "checkpoint_id": "x", "timestamp": "06:30:00"},
+            {"id": 11, "checkpoint_id": 3703, "timestamp": "06:50:00"},
+        ])
+
+        data_loader.sync_once()
+
+        self.assertEqual([r[0] for r in self.rejected_checkpoints], [9, 10])
+        self.assertEqual(fake.kinds(), ["dispatch"])
+        self.assertEqual(self.marked, [("checkpoint", 11)])
+
+    def test_fallo_temporal_del_backend_y_recuperacion_sube_la_marcacion(self):
+        fake = FakeSimtra(dispatch=[SEND_RETRY, SEND_OK])
+        self.install(fake, checkpoints=[{"id": 9, "checkpoint_id": 3701, "timestamp": "06:10:00"}])
+
+        data_loader.sync_once()                 # backend caído: queda pendiente
+        self.assertEqual(self.marked, [])
+        data_loader.sync_once()                 # se recupera: la misma hora
+
+        self.assertEqual(self.marked, [("checkpoint", 9)])
+        self.assertEqual([c[1] for c in fake.calls],
+                         [{"id": 3701, "time_reported": "06:10:00"}] * 2)
 
     def test_presupuesto_de_tiempo_acota_la_tanda_gps(self):
         fake = FakeSimtra()

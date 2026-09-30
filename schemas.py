@@ -107,6 +107,7 @@ class PassengerResponse(BaseModel):
     latitude: float
     longitude: float
     upload: bool
+    upload_error: str | None = None
     created_at: datetime
 
     class Config:

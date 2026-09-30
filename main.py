@@ -60,7 +60,32 @@ models.Base.metadata.create_all(bind=engine)
 # primera consulta.
 for column in database.ensure_schema(engine):
     log.warning("[SCHEMA] Columna agregada: %s", column)
-app = FastAPI(title="SIMTRA TRACKING API")
+
+
+def read_version(path: Path = Path(__file__).parent / "VERSION") -> dict:
+    """
+    Versión de la entrega desde el archivo VERSION (única fuente de verdad del
+    repositorio): «<semver> [etiqueta]», p. ej. «1.5.2 LTS».
+    """
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return {"version": "desconocida", "label": None}
+    version, _, label = raw.partition(" ")
+    return {"version": version, "label": label.strip() or None}
+
+
+VERSION = read_version()
+app = FastAPI(
+    title="SIMTRA TRACKING API",
+    version=" ".join(part for part in (VERSION["version"], VERSION["label"]) if part),
+)
+
+
+@app.get("/api/version")
+def get_version():
+    """Versión de simtra-bus-manager instalada en este equipo (diagnóstico)."""
+    return VERSION
 
 
 @app.exception_handler(RequestValidationError)
@@ -148,6 +173,14 @@ def update_status_checkpoint(id: int, db: Session = Depends(get_db)):
 def get_pending_checkpoint(db: Session = Depends(get_db)):
     return crud.get_pending_checkpoints(db)
 
+@app.post("/api/checkpoint/{id}/reject")
+def reject_checkpoint(id: int, data: GPSRejectRequest, db: Session = Depends(get_db)):
+    """Saca de la cola una marcación que device-api no aceptará nunca (no la marca subida)."""
+    checkpoint = crud.reject_pending_checkpoint(db, id=id, reason=data.reason)
+    if checkpoint is None:
+        raise HTTPException(status_code=404, detail="Checkpoint no encontrado")
+    return checkpoint
+
 
 
 #endpoints passengers
@@ -173,6 +206,14 @@ def update_status_passenger(id: int, db: Session = Depends(get_db)):
 @app.get("/api/passenger/pending")
 def get_pending_passenger(db: Session = Depends(get_db)):
     return crud.get_pending_passengers(db)
+
+@app.post("/api/passenger/{id}/reject", response_model=PassengerResponse)
+def reject_passenger(id: int, data: GPSRejectRequest, db: Session = Depends(get_db)):
+    """Saca de la cola un evento que no se subirá nunca (no lo marca subido)."""
+    passenger = crud.reject_pending_passenger(db, id=id, reason=data.reason)
+    if passenger is None:
+        raise HTTPException(status_code=404, detail="Pasajero no encontrado")
+    return passenger
 
 
 #endpoints dispatch
